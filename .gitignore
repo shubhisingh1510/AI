@@ -1,0 +1,17 @@
+# Raw dataset images are third-party medical data (Kaggle: laithjj/diabetic-foot-ulcer-dfu,
+# license "Unknown" on the dataset card) — never commit/redistribute the actual image files.
+data/raw/
+data/_download/
+
+# Local virtualenv
+.venv/
+
+# Trained model weights / large artifacts (regenerable by running the pipeline)
+results/classical_backbone_state.pt
+results/classical_features.npy
+
+__pycache__/
+*.pyc
+
+# Raw stdout/stderr logs from manual training runs
+*.log

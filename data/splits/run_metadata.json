@@ -1,0 +1,18 @@
+{
+  "seed": 42,
+  "split_method": "stratified_image_level_fallback",
+  "has_patient_ids_csv": false,
+  "n_images": 1055,
+  "n_classes": 2,
+  "classes": [
+    "healthy",
+    "ulcer"
+  ],
+  "n_patients": 548,
+  "train_frac": 0.7,
+  "val_frac": 0.15,
+  "test_frac": 0.15,
+  "kfold": 5,
+  "train_val_test_split_file": "train_val_test_split_seed42.csv",
+  "kfold_split_file": "kfold_splits_seed42.csv"
+}

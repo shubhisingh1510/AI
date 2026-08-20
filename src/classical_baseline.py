@@ -1,0 +1,439 @@
+"""
+Classical baseline: pretrained ResNet-50, fine-tuned on the wound-image classification task.
+
+Trains on the train_val_test split from data_prep.py (early layers frozen first, then
+optionally unfinetuned end-to-end), evaluates on the held-out test set AND across the 5-fold
+CV splits, and saves:
+  - results/classical_metrics.json   (all metrics, test set + per-fold CV)
+  - results/classical_features.npy   (penultimate-layer features for the test set, reused by
+                                       quantum_hybrid.py so both models see identical CNN
+                                       features)
+  - results/classical_test_predictions.json  (per-image predictions, used for McNemar's test)
+  - figures/classical_training_curves.png
+  - figures/classical_confusion_matrix.png
+
+Run: python src/classical_baseline.py --config configs/config.yaml
+"""
+import argparse
+import copy
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import yaml
+from PIL import Image
+from sklearn.metrics import (
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from torch.utils.data import DataLoader, Dataset
+from torchvision import models, transforms
+
+
+def load_config(config_path: str) -> dict:
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def set_seed(seed: int):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+class WoundImageDataset(Dataset):
+    def __init__(self, df: pd.DataFrame, label_to_idx: dict, transform, base_dir: Path = None):
+        self.df = df.reset_index(drop=True)
+        self.label_to_idx = label_to_idx
+        self.transform = transform
+        self.base_dir = base_dir
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        fp = Path(row["filepath"])
+        if self.base_dir is not None and not fp.is_absolute():
+            fp = self.base_dir / fp
+        img = Image.open(fp).convert("RGB")
+        img = self.transform(img)
+        label = self.label_to_idx[row["label"]]
+        # Bare filenames collide across class folders in this dataset (e.g. both
+        # healthy/10.jpg and ulcer/10.jpg exist) -- use "label/filename" as the unique id
+        # everywhere downstream (predictions JSON, McNemar alignment, Grad-CAM lookup).
+        image_id = f"{row['label']}/{row['filename']}"
+        return img, label, image_id
+
+
+def build_transforms(cfg):
+    mean = cfg["classical"]["imagenet_mean"]
+    std = cfg["classical"]["imagenet_std"]
+    size = cfg["data"]["image_size"]
+    cj = cfg["classical"]["color_jitter"]
+
+    train_tf = transforms.Compose([
+        transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(p=0.2),
+        transforms.ColorJitter(
+            brightness=cj["brightness"], contrast=cj["contrast"],
+            saturation=cj["saturation"], hue=cj["hue"],
+        ),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std),
+    ])
+    eval_tf = transforms.Compose([
+        transforms.Resize(int(size * 1.14)),
+        transforms.CenterCrop(size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std),
+    ])
+    return train_tf, eval_tf
+
+
+def build_model(num_classes: int, pretrained: bool):
+    weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+    model = models.resnet50(weights=weights)
+    for p in model.parameters():
+        p.requires_grad = False
+    in_features = model.fc.in_features
+    model.fc = nn.Linear(in_features, num_classes)
+    return model
+
+
+def set_backbone_trainable(model, trainable: bool):
+    for name, p in model.named_parameters():
+        if "fc" in name:
+            continue
+        p.requires_grad = trainable
+
+
+def run_epoch(model, loader, criterion, optimizer, device, train: bool):
+    model.train() if train else model.eval()
+    total_loss, n_correct, n_total = 0.0, 0, 0
+    with torch.set_grad_enabled(train):
+        for imgs, labels, _ in loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            if train:
+                optimizer.zero_grad()
+            outputs = model(imgs)
+            loss = criterion(outputs, labels)
+            if train:
+                loss.backward()
+                optimizer.step()
+            total_loss += loss.item() * imgs.size(0)
+            preds = outputs.argmax(dim=1)
+            n_correct += (preds == labels).sum().item()
+            n_total += imgs.size(0)
+    return total_loss / n_total, n_correct / n_total
+
+
+def train_classical(model, train_loader, val_loader, cfg, device):
+    ccfg = cfg["classical"]
+    criterion = nn.CrossEntropyLoss()
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    best_val_loss = float("inf")
+    best_state = None
+    patience_counter = 0
+    unfrozen = False
+
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=ccfg["lr_head"], weight_decay=ccfg["weight_decay"],
+    )
+
+    for epoch in range(ccfg["epochs"]):
+        if ccfg["unfreeze_after"] and not unfrozen and epoch == ccfg["freeze_backbone_epochs"]:
+            print(f"Epoch {epoch}: unfreezing backbone for full fine-tuning.")
+            set_backbone_trainable(model, True)
+            unfrozen = True
+            optimizer = torch.optim.Adam(
+                model.parameters(), lr=ccfg["lr_finetune"], weight_decay=ccfg["weight_decay"],
+            )
+
+        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, True)
+        val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, device, False)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+        print(f"Epoch {epoch+1}/{ccfg['epochs']}  train_loss={train_loss:.4f} "
+              f"train_acc={train_acc:.4f}  val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
+
+        if val_loss < best_val_loss - 1e-5:
+            best_val_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= ccfg["early_stopping_patience"]:
+                print(f"Early stopping at epoch {epoch+1} (best val_loss={best_val_loss:.4f}).")
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model, history
+
+
+@torch.no_grad()
+def extract_features_and_predict(model, loader, device):
+    """Returns penultimate-layer features, logits/probs, predictions, labels, filenames."""
+    model.eval()
+    feature_extractor = nn.Sequential(*list(model.children())[:-1])  # drop fc -> (B, 2048, 1, 1)
+
+    all_features, all_probs, all_preds, all_labels, all_files = [], [], [], [], []
+    for imgs, labels, files in loader:
+        imgs = imgs.to(device)
+        feats = feature_extractor(imgs).flatten(1)  # (B, 2048)
+        logits = model.fc(feats)
+        probs = torch.softmax(logits, dim=1)
+        preds = probs.argmax(dim=1)
+
+        all_features.append(feats.cpu().numpy())
+        all_probs.append(probs.cpu().numpy())
+        all_preds.append(preds.cpu().numpy())
+        all_labels.append(labels.numpy())
+        all_files.extend(files)
+
+    return (
+        np.concatenate(all_features),
+        np.concatenate(all_probs),
+        np.concatenate(all_preds),
+        np.concatenate(all_labels),
+        all_files,
+    )
+
+
+def compute_metrics(y_true, y_pred, y_probs, n_classes):
+    metrics = {
+        "accuracy": float((y_true == y_pred).mean()),
+        "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
+        "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+    }
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(n_classes)))
+    metrics["confusion_matrix"] = cm.tolist()
+
+    if n_classes == 2:
+        tn, fp, fn, tp = cm.ravel()
+        metrics["sensitivity"] = float(tp / (tp + fn)) if (tp + fn) > 0 else None
+        metrics["specificity"] = float(tn / (tn + fp)) if (tn + fp) > 0 else None
+        try:
+            metrics["roc_auc"] = float(roc_auc_score(y_true, y_probs[:, 1]))
+        except ValueError as e:
+            metrics["roc_auc"] = None
+            metrics["roc_auc_error"] = str(e)
+    else:
+        try:
+            metrics["roc_auc_ovr_macro"] = float(
+                roc_auc_score(y_true, y_probs, multi_class="ovr", average="macro")
+            )
+        except ValueError as e:
+            metrics["roc_auc_ovr_macro"] = None
+            metrics["roc_auc_error"] = str(e)
+    return metrics
+
+
+def plot_training_curves(history, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    axes[0].plot(history["train_loss"], label="train")
+    axes[0].plot(history["val_loss"], label="val")
+    axes[0].set_title("Loss")
+    axes[0].set_xlabel("epoch")
+    axes[0].legend()
+
+    axes[1].plot(history["train_acc"], label="train")
+    axes[1].plot(history["val_acc"], label="val")
+    axes[1].set_title("Accuracy")
+    axes[1].set_xlabel("epoch")
+    axes[1].legend()
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_confusion_matrix(cm, class_names, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names,
+                yticklabels=class_names, ax=ax)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title("Classical Baseline — Test Confusion Matrix")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--smoke-test", action="store_true",
+                         help="Run 1 epoch on a tiny subset to verify the pipeline executes.")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    research_root = script_dir.parent
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        candidate = research_root / config_path
+        config_path = candidate if candidate.exists() else config_path
+    cfg = load_config(str(config_path))
+
+    set_seed(cfg["seed"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    splits_dir = research_root / cfg["data"]["splits_dir"]
+    meta_path = splits_dir / "run_metadata.json"
+    if not meta_path.exists():
+        print("No splits found. Run src/data_prep.py first.")
+        return
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    split_df = pd.read_csv(splits_dir / meta["train_val_test_split_file"])
+    fold_df = pd.read_csv(splits_dir / meta["kfold_split_file"])
+    classes = meta["classes"]
+    label_to_idx = {c: i for i, c in enumerate(classes)}
+    n_classes = len(classes)
+
+    train_tf, eval_tf = build_transforms(cfg)
+
+    results_dir = research_root / cfg["paths"]["results_dir"]
+    figures_dir = research_root / cfg["paths"]["figures_dir"]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Main train/val/test run ----
+    train_df = split_df[split_df["split"] == "train"]
+    val_df = split_df[split_df["split"] == "val"]
+    test_df = split_df[split_df["split"] == "test"]
+
+    if args.smoke_test:
+        train_df = train_df.groupby("label", group_keys=False).head(2)
+        val_df = val_df.groupby("label", group_keys=False).head(2)
+        test_df = test_df.groupby("label", group_keys=False).head(2)
+        cfg["classical"]["epochs"] = 1
+        cfg["classical"]["freeze_backbone_epochs"] = 1
+        cfg["classical"]["early_stopping_patience"] = 1
+
+    ccfg = cfg["classical"]
+    train_loader = DataLoader(
+        WoundImageDataset(train_df, label_to_idx, train_tf, research_root),
+        batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
+    )
+    val_loader = DataLoader(
+        WoundImageDataset(val_df, label_to_idx, eval_tf, research_root),
+        batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
+    )
+    test_loader = DataLoader(
+        WoundImageDataset(test_df, label_to_idx, eval_tf, research_root),
+        batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
+    )
+
+    model = build_model(n_classes, ccfg["pretrained"]).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable_start = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model params: {n_params:,} total, {n_trainable_start:,} trainable at start.")
+
+    t0 = time.time()
+    model, history = train_classical(model, train_loader, val_loader, cfg, device)
+    train_time_s = time.time() - t0
+
+    plot_training_curves(history, figures_dir / "classical_training_curves.png")
+
+    t0 = time.time()
+    feats, probs, preds, labels, files = extract_features_and_predict(model, test_loader, device)
+    inference_time_s = time.time() - t0
+    inference_time_per_image_ms = 1000 * inference_time_s / max(len(files), 1)
+
+    test_metrics = compute_metrics(labels, preds, probs, n_classes)
+    plot_confusion_matrix(np.array(test_metrics["confusion_matrix"]), classes,
+                           figures_dir / "classical_confusion_matrix.png")
+
+    np.save(results_dir / "classical_features.npy", feats)
+    torch.save(model.state_dict(), results_dir / "classical_backbone_state.pt")
+    with open(results_dir / "classical_test_predictions.json", "w") as f:
+        json.dump({
+            "filenames": files,
+            "y_true": labels.tolist(),
+            "y_pred": preds.tolist(),
+            "y_probs": probs.tolist(),
+            "classes": classes,
+        }, f, indent=2)
+
+    # ---- 5-fold CV (trained fresh per fold, same architecture/hparams) ----
+    cv_results = []
+    if not args.smoke_test:
+        k = meta["kfold"]
+        for fold in range(k):
+            print(f"\n=== CV fold {fold+1}/{k} ===")
+            fold_train_df = fold_df[fold_df["fold"] != fold]
+            fold_test_df = fold_df[fold_df["fold"] == fold]
+            fold_train_loader = DataLoader(
+                WoundImageDataset(fold_train_df, label_to_idx, train_tf, research_root),
+                batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
+            )
+            fold_test_loader = DataLoader(
+                WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root),
+                batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
+            )
+            fold_model = build_model(n_classes, ccfg["pretrained"]).to(device)
+            fold_model, _ = train_classical(fold_model, fold_train_loader, fold_test_loader, cfg, device)
+            _, fp, fpred, flabels, _ = extract_features_and_predict(fold_model, fold_test_loader, device)
+            fold_metrics = compute_metrics(flabels, fpred, fp, n_classes)
+            fold_metrics["fold"] = fold
+            cv_results.append(fold_metrics)
+            print(f"Fold {fold} accuracy={fold_metrics['accuracy']:.4f}")
+    else:
+        print("Smoke test: skipping 5-fold CV loop.")
+
+    output = {
+        "model": "resnet50_classical_baseline",
+        "seed": cfg["seed"],
+        "split_method": meta["split_method"],
+        "n_params": int(n_params),
+        "train_time_s": train_time_s,
+        "inference_time_s_total_test": inference_time_s,
+        "inference_time_ms_per_image": inference_time_per_image_ms,
+        "test_metrics": test_metrics,
+        "cv_fold_metrics": cv_results,
+        "cv_mean_accuracy": float(np.mean([r["accuracy"] for r in cv_results])) if cv_results else None,
+        "cv_std_accuracy": float(np.std([r["accuracy"] for r in cv_results])) if cv_results else None,
+        "history": history,
+        "smoke_test": args.smoke_test,
+    }
+    with open(results_dir / "classical_metrics.json", "w") as f:
+        json.dump(output, f, indent=2)
+
+    print("\n=== Classical baseline summary ===")
+    print(f"Test accuracy: {test_metrics['accuracy']:.4f}")
+    print(f"Test F1 (macro): {test_metrics['f1_macro']:.4f}")
+    if cv_results:
+        print(f"CV accuracy: {output['cv_mean_accuracy']:.4f} +/- {output['cv_std_accuracy']:.4f}")
+    print(f"Saved: {results_dir/'classical_metrics.json'}, {results_dir/'classical_features.npy'}")
+
+
+if __name__ == "__main__":
+    main()
