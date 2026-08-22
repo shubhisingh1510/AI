@@ -50,6 +50,7 @@ from classical_baseline import (
     plot_confusion_matrix,
     set_seed,
 )
+from domain_features import N_DOMAIN_FEATURES, extract_domain_features_for_df
 
 
 def build_quantum_layer(num_qubits: int, circuit_depth: int, diff_method: str):
@@ -154,7 +155,7 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg, d
 
 
 def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_depth=None,
-                         smoke_test=False):
+                         feature_encoding=None, smoke_test=False):
     """
     Full pipeline: load classical checkpoint's features (or recompute from a fresh classical
     checkpoint), PCA-fit on train, train hybrid head, evaluate on test + CV folds.
@@ -166,9 +167,22 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
         qcfg["pca_dims"] = num_qubits
     if circuit_depth is not None:
         qcfg["circuit_depth"] = circuit_depth
+    if feature_encoding is not None:
+        qcfg["feature_encoding"] = feature_encoding
     if smoke_test:
         qcfg["epochs"] = 1
         qcfg["early_stopping_patience"] = 1
+
+    feature_encoding = qcfg.get("feature_encoding", "pca")
+    if feature_encoding not in ("pca", "domain"):
+        raise ValueError(f"quantum.feature_encoding must be 'pca' or 'domain', got {feature_encoding!r}")
+    if feature_encoding == "domain" and qcfg["num_qubits"] != N_DOMAIN_FEATURES:
+        raise ValueError(
+            f"feature_encoding='domain' produces exactly {N_DOMAIN_FEATURES} features "
+            f"(see domain_features.py), but quantum.num_qubits={qcfg['num_qubits']}. "
+            f"Set num_qubits: {N_DOMAIN_FEATURES} in config.yaml, or use feature_encoding: pca "
+            "for an arbitrary qubit count."
+        )
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
     meta_path = splits_dir / "run_metadata.json"
@@ -182,22 +196,37 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
     fold_df = pd.read_csv(splits_dir / meta["kfold_split_file"])
 
     results_dir = research_root / cfg["paths"]["results_dir"]
-    ckpt_path = results_dir / "classical_backbone_state.pt"
-    if not ckpt_path.exists():
-        raise FileNotFoundError(
-            f"{ckpt_path} not found. Run classical_baseline.py first (it must save the "
-            "trained backbone state_dict so quantum_hybrid.py can reuse the SAME frozen CNN)."
-        )
-    state = torch.load(ckpt_path, map_location=device)
-    backbone = load_backbone_for_features(state, n_classes, cfg["classical"]["pretrained"], device)
-    for p in backbone.parameters():
-        p.requires_grad = False
+    backbone = None
+    if feature_encoding == "pca":
+        # Only the PCA-of-CNN-features path needs the classical backbone; the "domain" path
+        # is a separate, CNN-free classifier (raw image -> hand-designed features -> circuit).
+        ckpt_path = results_dir / "classical_backbone_state.pt"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"{ckpt_path} not found. Run classical_baseline.py first (it must save the "
+                "trained backbone state_dict so quantum_hybrid.py can reuse the SAME frozen CNN)."
+            )
+        state = torch.load(ckpt_path, map_location=device)
+        backbone = load_backbone_for_features(state, n_classes, cfg["classical"]["pretrained"], device)
+        for p in backbone.parameters():
+            p.requires_grad = False
 
     _, eval_tf = build_transforms(cfg)
 
     def loader_for(df):
         ds = WoundImageDataset(df, label_to_idx, eval_tf, research_root)
         return DataLoader(ds, batch_size=cfg["classical"]["batch_size"], shuffle=False, num_workers=0)
+
+    def encode(df):
+        """(features, labels, file_ids) for one split, under whichever encoding is active."""
+        if feature_encoding == "domain":
+            feats = extract_domain_features_for_df(df, research_root)
+            df_r = df.reset_index(drop=True)
+            labels = df_r["label"].map(label_to_idx).to_numpy()
+            files = (df_r["label"] + "/" + df_r["filename"]).tolist()
+            return feats, labels, files
+        feats, _, _, labels, files = get_cnn_features(backbone, loader_for(df), device)
+        return feats, labels, files
 
     train_df = split_df[split_df["split"] == "train"]
     val_df = split_df[split_df["split"] == "val"]
@@ -210,15 +239,19 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
         val_df = val_df.groupby("label", group_keys=False).head(4)
         test_df = test_df.groupby("label", group_keys=False).head(4)
 
-    train_feats_raw, _, _, train_labels, _ = get_cnn_features(backbone, loader_for(train_df), device)
-    val_feats_raw, _, _, val_labels, _ = get_cnn_features(backbone, loader_for(val_df), device)
-    test_feats_raw, _, _, test_labels, test_files = get_cnn_features(backbone, loader_for(test_df), device)
+    train_feats_raw, train_labels, _ = encode(train_df)
+    val_feats_raw, val_labels, _ = encode(val_df)
+    test_feats_raw, test_labels, test_files = encode(test_df)
 
-    pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
-    pca.fit(train_feats_raw)
-    train_feats = pca.transform(train_feats_raw)
-    val_feats = pca.transform(val_feats_raw)
-    test_feats = pca.transform(test_feats_raw)
+    if feature_encoding == "pca":
+        pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
+        pca.fit(train_feats_raw)
+        train_feats = pca.transform(train_feats_raw)
+        val_feats = pca.transform(val_feats_raw)
+        test_feats = pca.transform(test_feats_raw)
+    else:
+        # Domain features are already exactly num_qubits-dimensional -- no reduction needed.
+        train_feats, val_feats, test_feats = train_feats_raw, val_feats_raw, test_feats_raw
 
     # Angle embedding expects values roughly in [-pi, pi]; normalize PCA output per-dimension
     # using train-set statistics (fit on train only, applied to val/test, no leakage).
@@ -253,13 +286,16 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
                   f"depth={qcfg['circuit_depth']}) ===")
             fold_train_df = fold_df[fold_df["fold"] != fold]
             fold_test_df = fold_df[fold_df["fold"] == fold]
-            ft_raw, _, _, ft_labels, _ = get_cnn_features(backbone, loader_for(fold_train_df), device)
-            fte_raw, _, _, fte_labels, _ = get_cnn_features(backbone, loader_for(fold_test_df), device)
+            ft_raw, ft_labels, _ = encode(fold_train_df)
+            fte_raw, fte_labels, _ = encode(fold_test_df)
 
-            fold_pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
-            fold_pca.fit(ft_raw)
-            ft = fold_pca.transform(ft_raw)
-            fte = fold_pca.transform(fte_raw)
+            if feature_encoding == "pca":
+                fold_pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
+                fold_pca.fit(ft_raw)
+                ft = fold_pca.transform(ft_raw)
+                fte = fold_pca.transform(fte_raw)
+            else:
+                ft, fte = ft_raw, fte_raw
             fold_scale = np.pi / (np.abs(ft).max(axis=0) + 1e-8)
             ft, fte = ft * fold_scale, fte * fold_scale
 
@@ -277,6 +313,7 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
 
     return {
         "model": "quantum_hybrid",
+        "feature_encoding": feature_encoding,
         "num_qubits": qcfg["num_qubits"],
         "circuit_depth": qcfg["circuit_depth"],
         "n_params": int(n_params),
@@ -327,7 +364,8 @@ def main():
         json.dump(preds, f, indent=2)
 
     print("\n=== Quantum hybrid summary ===")
-    print(f"Qubits={result['num_qubits']} depth={result['circuit_depth']}")
+    print(f"Feature encoding={result['feature_encoding']} qubits={result['num_qubits']} "
+          f"depth={result['circuit_depth']}")
     print(f"Test accuracy: {result['test_metrics']['accuracy']:.4f}")
     print(f"Test F1 (macro): {result['test_metrics']['f1_macro']:.4f}")
     if result["cv_fold_metrics"]:

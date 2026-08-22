@@ -1,8 +1,12 @@
 """
 Sweeps qubit count and circuit depth for the quantum hybrid head, retraining the head each
-time (the CNN backbone stays frozen and reused across every run — only PCA dims and the
-quantum circuit change). Saves results/ablation_results.csv and
-figures/ablation_qubits_vs_accuracy.png.
+time, across BOTH feature encodings:
+  - "pca":    generic PCA-of-frozen-CNN-features, swept across every (qubit_count, depth) pair.
+  - "domain": the six clinically-motivated wound features (src/domain_features.py), which are
+              fixed-dimensional (see N_DOMAIN_FEATURES) so only depth is swept, at num_qubits
+              fixed to that dimensionality.
+Saves results/ablation_results.csv (both encodings, tagged by a feature_encoding column) and
+figures/ablation_qubits_vs_accuracy.png (pca sweep only, since domain has one qubit count).
 
 Run: python src/ablation.py --config configs/config.yaml
 """
@@ -14,6 +18,7 @@ import torch
 import yaml
 
 from classical_baseline import load_config, set_seed
+from domain_features import N_DOMAIN_FEATURES
 from quantum_hybrid import run_hybrid_pipeline
 
 
@@ -40,24 +45,30 @@ def main():
         depths = depths[:1]
 
     rows = []
-    for n_qubits in qubit_counts:
-        for depth in depths:
-            print(f"\n########## Ablation: qubits={n_qubits}, depth={depth} ##########")
-            result = run_hybrid_pipeline(
-                cfg, research_root, device,
-                num_qubits=n_qubits, circuit_depth=depth, smoke_test=args.smoke_test,
-            )
-            rows.append({
-                "num_qubits": n_qubits,
-                "circuit_depth": depth,
-                "n_params": result["n_params"],
-                "test_accuracy": result["test_metrics"]["accuracy"],
-                "test_f1_macro": result["test_metrics"]["f1_macro"],
-                "cv_mean_accuracy": result.get("cv_mean_accuracy"),
-                "cv_std_accuracy": result.get("cv_std_accuracy"),
-                "train_time_s": result["train_time_s"],
-                "inference_time_ms_per_image": result["inference_time_ms_per_image"],
-            })
+    for encoding in ("pca", "domain"):
+        for n_qubits in qubit_counts:
+            if encoding == "domain" and n_qubits != N_DOMAIN_FEATURES:
+                continue  # domain features are fixed-dimensional; only pca varies qubit count
+            for depth in depths:
+                print(f"\n########## Ablation: encoding={encoding}, qubits={n_qubits}, "
+                      f"depth={depth} ##########")
+                result = run_hybrid_pipeline(
+                    cfg, research_root, device,
+                    num_qubits=n_qubits, circuit_depth=depth, feature_encoding=encoding,
+                    smoke_test=args.smoke_test,
+                )
+                rows.append({
+                    "feature_encoding": encoding,
+                    "num_qubits": n_qubits,
+                    "circuit_depth": depth,
+                    "n_params": result["n_params"],
+                    "test_accuracy": result["test_metrics"]["accuracy"],
+                    "test_f1_macro": result["test_metrics"]["f1_macro"],
+                    "cv_mean_accuracy": result.get("cv_mean_accuracy"),
+                    "cv_std_accuracy": result.get("cv_std_accuracy"),
+                    "train_time_s": result["train_time_s"],
+                    "inference_time_ms_per_image": result["inference_time_ms_per_image"],
+                })
 
     results_dir = research_root / cfg["paths"]["results_dir"]
     figures_dir = research_root / cfg["paths"]["figures_dir"]
@@ -74,13 +85,18 @@ def main():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
+        pca_df = df[df["feature_encoding"] == "pca"]
         fig, ax = plt.subplots(figsize=(7, 5))
-        for depth in sorted(df["circuit_depth"].unique()):
-            sub = df[df["circuit_depth"] == depth].sort_values("num_qubits")
-            ax.plot(sub["num_qubits"], sub["test_accuracy"], marker="o", label=f"depth={depth}")
+        for depth in sorted(pca_df["circuit_depth"].unique()):
+            sub = pca_df[pca_df["circuit_depth"] == depth].sort_values("num_qubits")
+            ax.plot(sub["num_qubits"], sub["test_accuracy"], marker="o", label=f"pca, depth={depth}")
+        domain_df = df[df["feature_encoding"] == "domain"]
+        if not domain_df.empty:
+            ax.axhline(domain_df["test_accuracy"].max(), color="grey", linestyle="--",
+                       label="domain encoding (best depth)")
         ax.set_xlabel("Number of qubits (= PCA dimensions)")
         ax.set_ylabel("Test accuracy")
-        ax.set_title("Ablation: qubit count / circuit depth vs. test accuracy")
+        ax.set_title("Ablation: qubit count / circuit depth / feature encoding vs. test accuracy")
         ax.legend()
         fig.tight_layout()
         fig.savefig(figures_dir / "ablation_qubits_vs_accuracy.png", dpi=150)

@@ -35,9 +35,12 @@ classical:
     hue: 0.02
 
 quantum:
-  num_qubits: 6          # = PCA output dimensions; ablation.py sweeps this
+  feature_encoding: "domain"  # "domain" (6 clinically-motivated features, src/domain_features.py,
+                               # no CNN backbone needed) or "pca" (generic PCA-of-CNN-features,
+                               # the original "quantum transfer learning" pattern). See README.
+  num_qubits: 6          # domain encoding always produces exactly 6; pca can use any count
   circuit_depth: 2        # number of StronglyEntanglingLayers; ablation.py sweeps this
-  pca_dims: 6              # must equal num_qubits
+  pca_dims: 6              # only used when feature_encoding: pca; must equal num_qubits
   batch_size: 32
   epochs: 60
   lr: 0.01
