@@ -5,6 +5,10 @@ statistically meaningful advantage over a matched classical baseline, on the sam
 image classification task? This codebase produces a fair, apples-to-apples comparison and
 reports the honest result either way — no assumption that quantum wins.
 
+**Current scope: diabetic foot / lower-limb ulcer images only** (see §2 for the exact
+dataset). The pipeline itself is class- and dataset-agnostic — pointing it at a different
+`data/raw/` would extend it to other wound sites — but no such data has been added yet.
+
 ## 1. Setup
 
 ```bash
@@ -33,6 +37,14 @@ data/raw/
 ```
 
 Any number of classes is supported (folder names become class labels).
+
+**Dataset currently in `data/raw/`:** Kaggle [`laithjj/diabetic-foot-ulcer-dfu`](https://www.kaggle.com/datasets/laithjj/diabetic-foot-ulcer-dfu)
+— 1,055 images, 2 classes (`healthy`: 543, `ulcer`: 512). **Scope: diabetic foot / lower-limb
+ulcers only** — not wounds elsewhere on the body. The dataset's Kaggle license field is listed
+as "Unknown"; confirm licensing terms before any distribution or publication that goes beyond
+internal research use. No patient-ID mapping ships with this dataset, so `data_prep.py` falls
+back to a stratified image-level split (see the warning it prints, and `split_method` in every
+results file) — patient-level leakage across train/val/test cannot be ruled out.
 
 **Optional but strongly recommended:** `data/patient_ids.csv` with columns `filename,patient_id`
 mapping every image filename to the patient it came from. If present, all splitting is done at
