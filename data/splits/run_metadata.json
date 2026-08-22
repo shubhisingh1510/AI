@@ -2,13 +2,13 @@
   "seed": 42,
   "split_method": "stratified_image_level_fallback",
   "has_patient_ids_csv": false,
-  "n_images": 1055,
+  "n_images": 5443,
   "n_classes": 2,
   "classes": [
-    "healthy",
-    "ulcer"
+    "normal",
+    "wound"
   ],
-  "n_patients": 548,
+  "n_patients": 5443,
   "train_frac": 0.7,
   "val_frac": 0.15,
   "test_frac": 0.15,

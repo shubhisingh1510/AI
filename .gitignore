@@ -1,7 +1,10 @@
-# Raw dataset images are third-party medical data (Kaggle: laithjj/diabetic-foot-ulcer-dfu,
-# license "Unknown" on the dataset card) — never commit/redistribute the actual image files.
+# Raw dataset images are third-party medical data. Currently: "Lower Limb and Feet Wound
+# Image Dataset for Medical Analysis" (Mendeley Data, DOI 10.17632/hsj38fwnvr, CC BY 4.0).
+# Not committed simply to keep the repo small/fast to clone -- run scripts/fetch_dataset.py
+# to repopulate data/raw/ (normal/, wound/) from the public, checksum-verified source.
 data/raw/
 data/_download/
+data/raw_dfu_archive/
 
 # Local virtualenv
 .venv/

@@ -5,9 +5,9 @@ statistically meaningful advantage over a matched classical baseline, on the sam
 image classification task? This codebase produces a fair, apples-to-apples comparison and
 reports the honest result either way — no assumption that quantum wins.
 
-**Current scope: diabetic foot / lower-limb ulcer images only** (see §2 for the exact
+**Current scope: lower-limb wound images (not foot-specific)** (see §2 for the exact
 dataset). The pipeline itself is class- and dataset-agnostic — pointing it at a different
-`data/raw/` would extend it to other wound sites — but no such data has been added yet.
+`data/raw/` would extend it to other wound sites.
 
 ## 1. Setup
 
@@ -38,13 +38,26 @@ data/raw/
 
 Any number of classes is supported (folder names become class labels).
 
-**Dataset currently in `data/raw/`:** Kaggle [`laithjj/diabetic-foot-ulcer-dfu`](https://www.kaggle.com/datasets/laithjj/diabetic-foot-ulcer-dfu)
-— 1,055 images, 2 classes (`healthy`: 543, `ulcer`: 512). **Scope: diabetic foot / lower-limb
-ulcers only** — not wounds elsewhere on the body. The dataset's Kaggle license field is listed
-as "Unknown"; confirm licensing terms before any distribution or publication that goes beyond
-internal research use. No patient-ID mapping ships with this dataset, so `data_prep.py` falls
-back to a stratified image-level split (see the warning it prints, and `split_method` in every
-results file) — patient-level leakage across train/val/test cannot be ruled out.
+**Dataset currently in `data/raw/`:** ["Lower Limb and Feet Wound Image Dataset for Medical
+Analysis"](https://data.mendeley.com/datasets/hsj38fwnvr/3) (Mendeley Data, DOI
+`10.17632/hsj38fwnvr`, Md Masudul Islam et al., **CC BY 4.0**) — 5,443 images, 2 classes
+(`normal`: 2,757, `wound`: 2,686), covering the whole lower limb rather than the foot alone.
+Not committed to the repo (kept small/fast to clone); run `python scripts/fetch_dataset.py`
+to download and unpack it — the script verifies the archive's sha256 hash against Mendeley's
+published value before extracting anything.
+
+Note on class granularity: the dataset's companion paper describes 8 wound sub-types
+(diabetic, pressure, trauma, venous, surgical, arterial, cellulitis, other), but **the public
+download does not include that per-image labeling** — no per-class folders or metadata file
+ship with the archive, only a flat, unlabeled `wound_main/` folder. So this is currently a
+**binary** normal-vs-wound classifier, not an 8-class one, despite the richer collection
+process described in the paper. (An earlier iteration of this project used Kaggle's
+`laithjj/diabetic-foot-ulcer-dfu`, foot-only, license "Unknown" — archived at
+`data/raw_dfu_archive/`, no longer used.)
+
+No patient-ID mapping ships with this dataset either, so `data_prep.py` falls back to a
+stratified image-level split (see the warning it prints, and `split_method` in every results
+file) — patient-level leakage across train/val/test cannot be ruled out.
 
 **Optional but strongly recommended:** `data/patient_ids.csv` with columns `filename,patient_id`
 mapping every image filename to the patient it came from. If present, all splitting is done at
