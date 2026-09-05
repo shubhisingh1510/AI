@@ -99,7 +99,14 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg, d
     val_y = torch.tensor(val_labels, dtype=torch.long).to(device)
 
     optimizer = torch.optim.Adam(head.parameters(), lr=qcfg["lr"], weight_decay=qcfg["weight_decay"])
-    criterion = nn.CrossEntropyLoss()
+    # Inverse-frequency class weights from this training split, mirroring
+    # classical_baseline.compute_class_weights so both models handle imbalance the same way.
+    n_classes = head.classifier.out_features
+    counts = np.maximum(np.bincount(train_labels, minlength=n_classes).astype(np.float64), 1)
+    class_weights = torch.tensor(
+        counts.sum() / (n_classes * counts), dtype=torch.float32, device=device
+    )
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     best_val_loss = float("inf")
     best_state = None

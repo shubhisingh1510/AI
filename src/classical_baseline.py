@@ -138,9 +138,24 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
     return total_loss / n_total, n_correct / n_total
 
 
+def compute_class_weights(dataset, n_classes: int, device) -> torch.Tensor:
+    """Inverse-frequency class weights from the given (training) dataset, normalized so the
+    mean weight is ~1 (i.e. weight_c = N / (n_classes * count_c)). Computed fresh per call so
+    each CV fold's training subset gets weights matching its own (slightly different) class
+    balance, rather than reusing the main split's weights everywhere."""
+    counts = np.zeros(n_classes, dtype=np.float64)
+    for label in dataset.df["label"]:
+        counts[dataset.label_to_idx[label]] += 1
+    counts = np.maximum(counts, 1)  # guard div-by-zero if a class is empty in some fold
+    weights = counts.sum() / (n_classes * counts)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
 def train_classical(model, train_loader, val_loader, cfg, device):
     ccfg = cfg["classical"]
-    criterion = nn.CrossEntropyLoss()
+    n_classes = len(train_loader.dataset.label_to_idx)
+    class_weights = compute_class_weights(train_loader.dataset, n_classes, device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_val_loss = float("inf")
     best_state = None
@@ -413,6 +428,7 @@ def main():
         "model": "resnet50_classical_baseline",
         "seed": cfg["seed"],
         "split_method": meta["split_method"],
+        "class_imbalance_strategy": "inverse_frequency_weighted_cross_entropy_loss",
         "n_params": int(n_params),
         "train_time_s": train_time_s,
         "inference_time_s_total_test": inference_time_s,

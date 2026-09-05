@@ -5,9 +5,10 @@ statistically meaningful advantage over a matched classical baseline, on the sam
 image classification task? This codebase produces a fair, apples-to-apples comparison and
 reports the honest result either way — no assumption that quantum wins.
 
-**Current scope: lower-limb wound images (not foot-specific)** (see §2 for the exact
-dataset). The pipeline itself is class- and dataset-agnostic — pointing it at a different
-`data/raw/` would extend it to other wound sites.
+**Current scope: specific wound-type classification (venous / diabetic / pressure /
+surgical)** — not just wound-vs-normal detection (see §2 for the exact dataset and why an
+arterial class is not yet included). The pipeline itself is class- and dataset-agnostic —
+pointing it at a different `data/raw/` would extend it to other wound sites or class sets.
 
 ## 1. Setup
 
@@ -38,22 +39,27 @@ data/raw/
 
 Any number of classes is supported (folder names become class labels).
 
-**Dataset currently in `data/raw/`:** ["Lower Limb and Feet Wound Image Dataset for Medical
-Analysis"](https://data.mendeley.com/datasets/hsj38fwnvr/3) (Mendeley Data, DOI
-`10.17632/hsj38fwnvr`, Md Masudul Islam et al., **CC BY 4.0**) — 5,443 images, 2 classes
-(`normal`: 2,757, `wound`: 2,686), covering the whole lower limb rather than the foot alone.
-Not committed to the repo (kept small/fast to clone); run `python scripts/fetch_dataset.py`
-to download and unpack it — the script verifies the archive's sha256 hash against Mendeley's
-published value before extracting anything.
+**Dataset currently in `data/raw/`:** the [AZH Wound and Vascular Center
+dataset](https://github.com/uwm-bigdata/wound-classification-using-images-and-locations)
+(Milwaukee, WI; Anisuzzaman et al. 2022, *Sci Rep* 12:20057; Patel et al. 2024, *Sci Rep*
+14:7043) — 730 specialist-labeled images across 4 classes: `venous` (247), `diabetic` (185),
+`surgical` (164), `pressure` (134). Not committed to the repo (kept small/fast to clone); run
+`python scripts/fetch_azh_dataset.py` to download and unpack it — the script verifies the
+archives against sha256 hashes this project pinned itself (AZH does not publish an official
+checksum the way Mendeley does; see the script's docstring).
 
-Note on class granularity: the dataset's companion paper describes 8 wound sub-types
-(diabetic, pressure, trauma, venous, surgical, arterial, cellulitis, other), but **the public
-download does not include that per-image labeling** — no per-class folders or metadata file
-ship with the archive, only a flat, unlabeled `wound_main/` folder. So this is currently a
-**binary** normal-vs-wound classifier, not an 8-class one, despite the richer collection
-process described in the paper. (An earlier iteration of this project used Kaggle's
-`laithjj/diabetic-foot-ulcer-dfu`, foot-only, license "Unknown" — archived at
-`data/raw_dfu_archive/`, no longer used.)
+**No arterial class.** The original research goal is venous/arterial/diabetic ulcer
+classification, but no public dataset was found with all three cleanly labeled — see
+`dataset_report.md` and `paper/methodology/dataset_selection.md` for the full search and the
+tradeoff behind this choice. Treat any current results as venous/diabetic/pressure/surgical
+classification, not the full 3-way vascular-etiology task.
+
+(An earlier iteration of this project used Kaggle's `laithjj/diabetic-foot-ulcer-dfu`,
+foot-only, license "Unknown" — archived at `data/raw_dfu_archive/`, no longer used. The
+Mendeley "Lower Limb and Feet Wound Image Dataset" used before this switch — binary
+normal/wound only, no subtype labels in the public download despite the source paper
+describing 8 wound sub-types — is archived at `data/raw_mendeley_archive/`, also no longer
+used; `scripts/fetch_dataset.py` still fetches it if needed for the binary task.)
 
 No patient-ID mapping ships with this dataset either, so `data_prep.py` falls back to a
 stratified image-level split (see the warning it prints, and `split_method` in every results
@@ -97,6 +103,15 @@ python src/explainability.py --config configs/config.yaml
 
 Every script also accepts `--smoke-test` (1 epoch, tiny subset, skips the 5-fold CV loop) to
 verify the pipeline runs end-to-end before committing to a full run.
+
+## 3b. Class imbalance
+
+AZH's 4 classes are moderately imbalanced (venous 247, diabetic 185, surgical 164, pressure
+134 — max/min ratio 1.84x, per `results/dataset_audit.json`). Both `classical_baseline.py` and
+`quantum_hybrid.py` use inverse-frequency-weighted `CrossEntropyLoss`, recomputed from
+whichever training split is actually in use (main split or each CV fold), so per-fold class
+balance shifts are handled automatically rather than using one fixed weighting everywhere.
+This is recorded per-run as `class_imbalance_strategy` in `results/classical_metrics.json`.
 
 ## 4. Config
 
