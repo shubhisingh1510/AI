@@ -1,0 +1,565 @@
+<title>Ulcer Classification Report</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=Source+Sans+3:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root{
+  --bg:#f5f6f3;
+  --surface:#ffffff;
+  --ink:#16213a;
+  --ink-muted:#57647c;
+  --border:#dde2e0;
+  --accent:#0d6e6e;
+  --accent-soft:#e3f1ef;
+  --verified:#1f7a4d;
+  --verified-soft:#e6f4ec;
+  --pending:#96650f;
+  --pending-soft:#fbf1de;
+  --limitation:#a3352b;
+  --limitation-soft:#faeae8;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#11151c;
+    --surface:#181f29;
+    --ink:#e7ebf1;
+    --ink-muted:#93a1b5;
+    --border:#2a3340;
+    --accent:#3fb8ae;
+    --accent-soft:#173330;
+    --verified:#4cc287;
+    --verified-soft:#173327;
+    --pending:#e0ac4d;
+    --pending-soft:#33290f;
+    --limitation:#e2857b;
+    --limitation-soft:#331e1c;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11151c;
+  --surface:#181f29;
+  --ink:#e7ebf1;
+  --ink-muted:#93a1b5;
+  --border:#2a3340;
+  --accent:#3fb8ae;
+  --accent-soft:#173330;
+  --verified:#4cc287;
+  --verified-soft:#173327;
+  --pending:#e0ac4d;
+  --pending-soft:#33290f;
+  --limitation:#e2857b;
+  --limitation-soft:#331e1c;
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"Source Sans 3", -apple-system, sans-serif;
+  font-size:16px;
+  line-height:1.65;
+}
+h1,h2,h3{
+  font-family:"Source Serif 4", Georgia, serif;
+  text-wrap:balance;
+  color:var(--ink);
+  font-weight:700;
+}
+.mono{font-family:"IBM Plex Mono", ui-monospace, monospace;}
+
+/* The cover band is a deliberate, always-dark component independent of the page's own
+   light/dark theme (like a letterpress invitation) -- it must NOT use the --ink/--bg tokens,
+   which flip meaning between themes; it gets its own fixed palette instead. */
+.cover{
+  --cover-bg:#101a2e;
+  --cover-text:#eef2f4;
+  --cover-muted:#a9b4bf;
+  --cover-accent:#8fd6cf;
+  --cover-border:#303c4a;
+  background:var(--cover-bg);
+  color:var(--cover-text);
+  padding:56px 24px 44px;
+}
+.cover-inner{max-width:760px;margin:0 auto;}
+.eyebrow{
+  font-family:"IBM Plex Mono", monospace;
+  font-size:0.72rem;
+  letter-spacing:0.12em;
+  text-transform:uppercase;
+  color:var(--cover-accent);
+  margin-bottom:14px;
+}
+.cover h1{
+  color:var(--cover-text);
+  font-size:2.15rem;
+  line-height:1.2;
+  margin:0 0 14px;
+}
+.cover p.lede{
+  color:var(--cover-muted);
+  font-size:1.05rem;
+  max-width:620px;
+  margin:0 0 26px;
+}
+.cover-meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap:22px;
+  border-top:1px solid var(--cover-border);
+  padding-top:18px;
+  font-size:0.85rem;
+  color:var(--cover-muted);
+}
+.cover-meta div span{display:block;color:var(--cover-text);font-weight:600;margin-top:2px;}
+
+.wrap{max-width:760px;margin:0 auto;padding:44px 24px 90px;}
+
+.callout{
+  border-left:3px solid var(--accent);
+  background:var(--accent-soft);
+  padding:14px 18px;
+  border-radius:0 8px 8px 0;
+  font-size:0.94rem;
+  margin:22px 0;
+}
+.callout.limitation{border-color:var(--limitation);background:var(--limitation-soft);}
+
+section{margin-top:46px;}
+section > h2{
+  font-size:1.4rem;
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  margin-bottom:6px;
+  border-bottom:1px solid var(--border);
+  padding-bottom:10px;
+}
+section > h2 .num{
+  font-family:"IBM Plex Mono",monospace;
+  color:var(--accent);
+  font-size:0.95rem;
+  font-weight:600;
+}
+h3{font-size:1.08rem;margin:24px 0 8px;}
+p{margin:0 0 14px;}
+ul,ol{margin:0 0 14px;padding-left:22px;}
+li{margin-bottom:5px;}
+
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:0.92rem;}
+caption{caption-side:bottom;font-size:0.8rem;color:var(--ink-muted);text-align:left;margin-top:6px;}
+th,td{
+  text-align:left;
+  padding:8px 10px;
+  border-bottom:1px solid var(--border);
+  font-variant-numeric:tabular-nums;
+}
+th{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:0.72rem;
+  letter-spacing:0.04em;
+  text-transform:uppercase;
+  color:var(--ink-muted);
+  font-weight:500;
+}
+.tablewrap{overflow-x:auto;}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  font-family:"IBM Plex Mono",monospace;
+  font-size:0.7rem;
+  letter-spacing:0.03em;
+  text-transform:uppercase;
+  padding:3px 9px;
+  border-radius:999px;
+  font-weight:500;
+  white-space:nowrap;
+}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;}
+.pill.verified{background:var(--verified-soft);color:var(--verified);}
+.pill.verified::before{background:var(--verified);}
+.pill.pending{background:var(--pending-soft);color:var(--pending);}
+.pill.pending::before{background:var(--pending);}
+.pill.na{background:var(--border);color:var(--ink-muted);}
+.pill.na::before{background:var(--ink-muted);}
+
+.stat-row{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:12px;
+  margin:18px 0 22px;
+}
+.stat{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:14px 16px;
+}
+.stat .n{
+  font-family:"Source Serif 4",serif;
+  font-size:1.7rem;
+  font-weight:700;
+  color:var(--accent);
+  font-variant-numeric:tabular-nums;
+}
+.stat .l{font-size:0.78rem;color:var(--ink-muted);margin-top:2px;}
+
+figure{margin:22px 0;}
+figure img{max-width:100%;display:block;border:1px solid var(--border);border-radius:8px;}
+figcaption{font-size:0.82rem;color:var(--ink-muted);margin-top:8px;}
+
+.gradcam-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:14px;
+  margin:18px 0;
+}
+.gradcam-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:10px;
+  text-align:center;
+}
+.gradcam-card .imgs{display:flex;gap:4px;}
+.gradcam-card img{border-radius:6px;width:50%;border:1px solid var(--border);}
+.gradcam-card .lbl{font-size:0.78rem;margin-top:8px;color:var(--ink-muted);}
+.gradcam-card .lbl b{color:var(--ink);display:block;font-size:0.85rem;}
+
+.refs{font-size:0.88rem;color:var(--ink-muted);}
+.refs li{margin-bottom:10px;}
+
+.divider{height:1px;background:var(--border);margin:36px 0;}
+
+footer{
+  max-width:760px;margin:0 auto;padding:0 24px 60px;
+  font-size:0.78rem;color:var(--ink-muted);
+}
+</style>
+
+<div class="cover">
+  <div class="cover-inner">
+    <div class="eyebrow">Research Progress Report</div>
+    <h1>Image-Based Classification of Lower-Limb Ulcers: A Classical&ndash;Quantum Comparison</h1>
+    <p class="lede">Methodology, dataset collection, and current results for a study comparing a
+      classical CNN baseline against a hybrid CNN&ndash;quantum classifier on wound-image
+      etiology classification.</p>
+    <div class="cover-meta">
+      <div>Prepared<span>{{REPORT_DATE}}</span></div>
+      <div>Repository<span class="mono">github.com/shubhisingh1510/AI</span></div>
+      <div>Status<span>Dataset finalized &middot; classical baseline evaluated &middot; quantum comparison in progress</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+<div class="callout">
+  This report distinguishes <strong>completed, verified work</strong> from <strong>work still
+  in progress</strong> throughout &mdash; marked with status pills next to each claim. No number
+  in this document is projected or estimated; every figure comes from a script in the
+  repository that can be re-run to reproduce it.
+</div>
+
+<section id="s1">
+<h2><span class="num">01</span> Research Question &amp; Motivation</h2>
+<p>Chronic lower-limb ulcers &mdash; venous, arterial, and diabetic/neuropathic &mdash; are
+  managed very differently, but visually distinguishing them from a photograph alone is
+  difficult even for clinicians in some cases, and the arterial-versus-diabetic distinction in
+  particular is noted in the literature as a hard case. This project asks two linked
+  questions:</p>
+<ol>
+  <li>Can a deep-learning image classifier reliably distinguish between specific lower-limb
+    wound etiologies from a photograph, rather than only detecting "wound present"?</li>
+  <li>Does a hybrid classical&ndash;quantum classifier (a small variational quantum circuit on
+    top of extracted image features) provide any measurable advantage over a matched classical
+    baseline on the same task &mdash; or does it not, which is an equally valid and reportable
+    outcome?</li>
+</ol>
+<p>The project is explicitly designed to report the honest result either way: the
+  <span class="mono">evaluate_compare.py</span> script in the repository is written to never
+  describe a statistically non-significant difference between the classical and quantum models
+  as an "improvement" for either side.</p>
+</section>
+
+<section id="s2">
+<h2><span class="num">02</span> Dataset Search &amp; Selection Methodology</h2>
+<p>The original scope called for a three-way venous / arterial / diabetic classifier. Before
+  committing to that, every candidate public dataset was checked directly against its primary
+  source (paper, repository, or data-provider page) rather than trusted from a search-result
+  summary. Six candidates were evaluated:</p>
+
+<div class="tablewrap">
+<table>
+<caption>Full detail and 11-criterion ranking in <span class="mono">dataset_comparison.csv</span> and <span class="mound">dataset_report.md</span>.</caption>
+<thead><tr><th>Dataset</th><th>Images</th><th>Relevant classes</th><th>Access</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr><td><strong>AZH Wound &amp; Vascular Center</strong> <span class="mono">(chosen)</span></td><td>730</td><td>venous, diabetic, pressure, surgical</td><td>Public, immediate</td><td>Best available public option; no arterial class</td></tr>
+<tr><td>Univ. Hospital Regensburg</td><td>607</td><td>arterial, venous</td><td>Author email request only</td><td>Best label rigor for arterial vs. venous, but not public and no diabetic class</td></tr>
+<tr><td>Mendeley Lower-Limb &amp; Feet</td><td>5,443</td><td>normal / wound only</td><td>Public</td><td>No subtype labels in the actual download despite the source paper describing 8 types</td></tr>
+<tr><td>DFUC2021</td><td>15,683</td><td>diabetic only</td><td>Public (Zenodo)</td><td>Diabetic-only; would confound source dataset with pathology if merged</td></tr>
+<tr><td>AZHMT (AZH+Medetec)</td><td>1,088</td><td>arterial+venous merged</td><td>Unclear</td><td>Arterial/venous merged into one class &mdash; unusable for this split</td></tr>
+<tr><td>Medetec gallery</td><td>&asymp;85 (uncounted)</td><td>venous, arterial, diabetic, pressure</td><td>Public, manual</td><td>Unlabeled HTML gallery, no class folders, inconsistent quality</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><strong>Finding: no public, freely downloadable dataset provides clean per-image labels for
+  all three target classes.</strong> This reflects genuine scarcity of public arterial-ulcer
+  image data, not a gap in the search &mdash; arterial ulcers are clinically rarer than venous
+  or diabetic ulcers, and the one dataset found with real arterial labels (Regensburg) is
+  gated behind institutional data-sharing, not a public download.</p>
+
+<div class="callout">
+  <strong>Decision:</strong> proceed with the AZH dataset now (public, specialist-labeled,
+  four real wound-etiology classes) rather than block the entire project on an uncertain
+  email request to the Regensburg authors. The missing arterial class is treated as a stated
+  scope limitation throughout this report, not glossed over.
+</div>
+</section>
+
+<section id="s3">
+<h2><span class="num">03</span> Dataset Composition &amp; Quality Audit <span class="pill verified" style="margin-left:8px;">verified</span></h2>
+<p>Source: AZH Wound and Vascular Center, Milwaukee, WI &mdash; collected over a two-year
+  clinical period, labeled by a wound specialist (Anisuzzaman et al. 2022, <em>Sci Rep</em>
+  12:20057; Patel et al. 2024, <em>Sci Rep</em> 14:7043). Fetched via
+  <span class="mono">scripts/fetch_azh_dataset.py</span>, which verifies the archive against a
+  pinned sha256 hash before use.</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="n">730</div><div class="l">total images</div></div>
+  <div class="stat"><div class="n">4</div><div class="l">classes</div></div>
+  <div class="stat"><div class="n">1.84&times;</div><div class="l">class imbalance ratio</div></div>
+  <div class="stat"><div class="n">0</div><div class="l">corrupted images</div></div>
+</div>
+
+<figure>
+  <img src="{{IMG_CLASS_DIST}}" alt="Class distribution bar chart">
+  <figcaption>Fig. 1 &mdash; Class distribution: venous 247, diabetic 185, surgical 164,
+    pressure 134. Generated by <span class="mono">src/dataset_audit.py</span>.</figcaption>
+</figure>
+
+<p>An automated audit (<span class="mono">src/dataset_audit.py</span>) checked every image for
+  corruption, extension/content mismatches, exact and near-duplicates (within and across
+  classes), and resolution distribution:</p>
+<ul>
+  <li>0 corrupted files, 0 extension/content mismatches</li>
+  <li>1 exact-duplicate pair found, both filed under the same class (surgical) &mdash; a minor
+    AZH-side data quality note, not a cross-class labeling conflict</li>
+  <li>33 cross-class near-duplicate hash matches at a strict similarity threshold &mdash;
+    flagged for manual review rather than silently trusted or silently removed; likely false
+    positives from the coarse 8&times;8 hash rather than genuine mislabeling, given wound
+    photos share similar framing and skin tone</li>
+  <li>Image resolution ranges from 66&times;67px to 2624&times;2932px (mean
+    &asymp;237&times;239px) &mdash; all resized to 224&times;224px during preprocessing</li>
+</ul>
+<p><strong>Patient-level leakage:</strong> AZH does not ship a patient-ID file. This is reported
+  as <span class="mono">"NOT VERIFIABLE"</span> in the audit output rather than assumed safe
+  &mdash; see &sect;9 Limitations.</p>
+</section>
+
+<section id="s4">
+<h2><span class="num">04</span> Preprocessing &amp; Experimental Design <span class="pill verified" style="margin-left:8px;">verified</span></h2>
+<h3>Splitting</h3>
+<p>Because no patient-ID mapping exists, <span class="mono">src/data_prep.py</span> falls back
+  to a stratified <em>image-level</em> split (70/15/15 train/val/test, plus stratified 5-fold
+  CV) and explicitly records <span class="mono">split_method:
+  stratified_image_level_fallback</span> in every results file, so this limitation travels with
+  every downstream number rather than being forgotten after the split step.</p>
+
+<h3>Preprocessing &amp; augmentation</h3>
+<ul>
+  <li>Resize to 224&times;224, ImageNet mean/std normalization</li>
+  <li>Training-time augmentation: random resized crop (0.8&ndash;1.0 scale), horizontal flip,
+    vertical flip (p=0.2), color jitter (brightness/contrast/saturation 0.2, hue 0.02)</li>
+  <li>No augmentation that could plausibly alter medically meaningful characteristics (e.g. no
+    aggressive color/hue shifts that would distort wound-tissue color, which is diagnostically
+    relevant)</li>
+</ul>
+
+<h3>Class imbalance</h3>
+<p>Both the classical and quantum training scripts use inverse-frequency class-weighted
+  cross-entropy loss, recomputed from whichever training split is actually in use so each
+  cross-validation fold gets weights matching its own class balance rather than one fixed
+  weighting applied everywhere.</p>
+</section>
+
+<section id="s5">
+<h2><span class="num">05</span> Model Architecture</h2>
+<h3>Classical baseline <span class="pill verified" style="margin-left:6px;">verified</span></h3>
+<p>ResNet-50 (ImageNet-pretrained), classifier head replaced for 4 classes. Trained in two
+  phases: backbone frozen for the first 5 epochs (head-only warmup), then unfrozen for full
+  fine-tuning at a lower learning rate.</p>
+
+<h3>Hybrid classical&ndash;quantum classifier <span class="pill pending" style="margin-left:6px;">training in progress</span></h3>
+<p>Rather than the generic "quantum transfer learning" pattern (frozen CNN &rarr; PCA &rarr;
+  variational circuit), this project also implements a CNN-free alternative: six
+  clinically-motivated features computed directly from raw pixels &mdash; mean hue, hue
+  variance, mean saturation, a redness index (erythema proxy), a texture-energy roughness
+  proxy, and Canny edge density &mdash; feeding a 6-qubit variational circuit
+  (<span class="mono">StronglyEntanglingLayers</span>, PennyLane-Lightning, analytic adjoint
+  gradients). This is a genuinely different architecture from CNN+PCA+circuit, not a relabeling
+  of it, and is being run alongside the PCA-based variant for comparison.</p>
+</section>
+
+<section id="s6">
+<h2><span class="num">06</span> Training Configuration <span class="pill verified" style="margin-left:8px;">verified</span></h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Parameter</th><th>Classical</th><th>Quantum hybrid</th></tr></thead>
+<tbody>
+<tr><td>Batch size</td><td>32</td><td>32</td></tr>
+<tr><td>Max epochs</td><td>40</td><td>60</td></tr>
+<tr><td>Learning rate</td><td>1e-3 (head) / 1e-5 (fine-tune)</td><td>1e-2</td></tr>
+<tr><td>Early stopping patience</td><td>7 epochs</td><td>10 epochs</td></tr>
+<tr><td>Qubits / circuit depth</td><td>&mdash;</td><td>6 / 2</td></tr>
+<tr><td>Cross-validation</td><td>5-fold, stratified</td><td>5-fold, stratified</td></tr>
+<tr><td>Random seed</td><td colspan="2">42 (fixed across all scripts)</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section id="s7">
+<h2><span class="num">07</span> Results <span class="pill verified" style="margin-left:8px;">classical baseline verified</span></h2>
+<p>From the classical ResNet-50 baseline's held-out test set (116 images, main train/val/test
+  split &mdash; not yet the averaged 5-fold CV number, which is still running; see &sect;10):</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="n">74.1%</div><div class="l">test accuracy</div></div>
+  <div class="stat"><div class="n">0.731</div><div class="l">macro F1</div></div>
+  <div class="stat"><div class="n">0.735</div><div class="l">macro precision</div></div>
+  <div class="stat"><div class="n">0.732</div><div class="l">macro recall</div></div>
+</div>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead>
+<tbody>
+<tr><td>diabetic</td><td>0.727</td><td>0.857</td><td>0.787</td><td>28</td></tr>
+<tr><td>pressure</td><td>0.609</td><td>0.636</td><td>0.622</td><td>22</td></tr>
+<tr><td>surgical</td><td>0.810</td><td>0.680</td><td>0.739</td><td>25</td></tr>
+<tr><td>venous</td><td>0.795</td><td>0.756</td><td>0.775</td><td>41</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Pressure is the weakest class</strong> (lowest precision and recall) &mdash; the
+  confusion matrix below shows it is most often confused with diabetic and venous, which is
+  plausible clinically since pressure injuries can visually overlap with both depending on
+  location and stage.</p>
+
+<figure>
+  <img src="{{IMG_CONFUSION}}" alt="Confusion matrix">
+  <figcaption>Fig. 2 &mdash; Confusion matrix, held-out test set (rows = true class, columns =
+    predicted class).</figcaption>
+</figure>
+
+<figure>
+  <img src="{{IMG_CURVES}}" alt="Training and validation loss/accuracy curves">
+  <figcaption>Fig. 3 &mdash; Training curves. Backbone unfreezes at epoch 5 (visible loss
+    step); validation accuracy plateaus around 75&ndash;77% with no sign of divergence between
+    train/val loss, i.e. no severe overfitting despite the small dataset.</figcaption>
+</figure>
+</section>
+
+<section id="s8">
+<h2><span class="num">08</span> Explainability <span class="pill verified" style="margin-left:8px;">verified</span></h2>
+<p>Grad-CAM on the classical backbone's final convolutional block, for one correctly-classified
+  example per class plus one misclassification, to show the model's attention honestly rather
+  than cherry-picking only successes:</p>
+
+<div class="gradcam-grid">
+  <div class="gradcam-card">
+    <div class="imgs"><img src="{{IMG_GC_DIABETIC_IN}}"><img src="{{IMG_GC_DIABETIC_CAM}}"></div>
+    <div class="lbl"><b>Diabetic</b>correct &middot; 60.2% conf.</div>
+  </div>
+  <div class="gradcam-card">
+    <div class="imgs"><img src="{{IMG_GC_PRESSURE_IN}}"><img src="{{IMG_GC_PRESSURE_CAM}}"></div>
+    <div class="lbl"><b>Pressure</b>correct &middot; 78.7% conf.</div>
+  </div>
+  <div class="gradcam-card">
+    <div class="imgs"><img src="{{IMG_GC_SURGICAL_IN}}"><img src="{{IMG_GC_SURGICAL_CAM}}"></div>
+    <div class="lbl"><b>Surgical</b>correct &middot; 99.8% conf.</div>
+  </div>
+  <div class="gradcam-card">
+    <div class="imgs"><img src="{{IMG_GC_VENOUS_IN}}"><img src="{{IMG_GC_VENOUS_CAM}}"></div>
+    <div class="lbl"><b>Venous</b>correct &middot; 91.1% conf.</div>
+  </div>
+  <div class="gradcam-card">
+    <div class="imgs"><img src="{{IMG_GC_MISCLASS_IN}}"><img src="{{IMG_GC_MISCLASS_CAM}}"></div>
+    <div class="lbl"><b>Pressure&rarr;Diabetic</b>misclassified &middot; 61.5% conf.</div>
+  </div>
+</div>
+<p style="font-size:0.85rem;color:var(--ink-muted);">Each pair: original crop (left), Grad-CAM
+  heatmap (right; red/yellow = high influence on the prediction). No established, validated
+  explainability method comparable to Grad-CAM exists for variational quantum circuits in this
+  codebase &mdash; the quantum side is not given a fabricated equivalent.</p>
+</section>
+
+<section id="s9">
+<h2><span class="num">09</span> Limitations</h2>
+<ul>
+  <li><strong>No arterial class.</strong> The model cannot recognize arterial ulcers at all
+    &mdash; it was never trained on any. This is the single biggest scope gap relative to the
+    original three-way research question.</li>
+  <li><strong>Patient-level leakage cannot be ruled out.</strong> AZH ships no patient-ID
+    mapping; some images are known to come from the same patient at different healing stages,
+    and the current stratified image-level split cannot guarantee those stay within one split.</li>
+  <li><strong>Single-clinic source.</strong> All 730 images come from one center (Milwaukee,
+    WI) &mdash; no evidence yet on generalization to other cameras, lighting, or patient
+    populations.</li>
+  <li><strong>Small, moderately imbalanced dataset.</strong> 730 images across 4 classes
+    (134&ndash;247 per class) is small for deep learning; results should be read with that in
+    mind despite the class-weighted loss and stratified CV.</li>
+  <li><strong>Not a diagnostic tool.</strong> This is a research prototype. No claim here
+    should be read as validated for clinical decision-making.</li>
+</ul>
+</section>
+
+<section id="s10">
+<h2><span class="num">10</span> Status &amp; Next Steps</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Stage</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Dataset search, selection, audit</td><td><span class="pill verified">complete</span></td></tr>
+<tr><td>Patient-aware splitting (fallback mode)</td><td><span class="pill verified">complete</span></td></tr>
+<tr><td>Classical ResNet-50 baseline (main split)</td><td><span class="pill verified">complete &mdash; 74.1% test acc.</span></td></tr>
+<tr><td>Classical baseline 5-fold CV</td><td><span class="pill pending">in progress</span></td></tr>
+<tr><td>Quantum hybrid classifier</td><td><span class="pill pending">in progress</span></td></tr>
+<tr><td>Classical vs. quantum statistical comparison</td><td><span class="pill pending">queued</span></td></tr>
+<tr><td>Qubit/depth ablation study</td><td><span class="pill pending">queued</span></td></tr>
+<tr><td>Grad-CAM explainability</td><td><span class="pill verified">complete (classical side)</span></td></tr>
+<tr><td>Live classifier web app</td><td><span class="pill verified">complete &mdash; local Flask app</span></td></tr>
+<tr><td>Arterial-ulcer data (Regensburg request)</td><td><span class="pill na">not started &mdash; pending decision</span></td></tr>
+</tbody>
+</table>
+</div>
+<p>This report will be updated once the 5-fold CV, quantum comparison, and ablation sweep
+  finish running.</p>
+</section>
+
+<section id="s11">
+<h2><span class="num">11</span> Sources</h2>
+<ol class="refs">
+<li>Anisuzzaman, D.M. et al. (2022). Multi-modal wound classification using wound image and
+  location by deep neural network. <em>Scientific Reports</em> 12:20057.</li>
+<li>Patel, Y. et al. (2024). Integrated image and location analysis for wound classification: a
+  deep learning approach. <em>Scientific Reports</em> 14:7043.</li>
+<li>Neuwieser, H. et al. (2025). Interpreting Venous and Arterial Ulcer Images Through the
+  Grad-CAM Lens. <em>Diagnostics</em> 15(17):2184.</li>
+<li>Islam, M.M. et al. Lower Limb and Feet Wound Image Dataset for Medical Analysis. Mendeley
+  Data, DOI 10.17632/hsj38fwnvr.</li>
+<li>Selvaraju, R.R. et al. (2017). Grad-CAM: Visual Explanations from Deep Networks via
+  Gradient-Based Localization. <em>ICCV 2017</em>.</li>
+</ol>
+</section>
+
+</div>
+<footer>
+  Generated from the project repository (<span class="mono">github.com/shubhisingh1510/AI</span>)
+  on {{REPORT_DATE}}. Every figure and table in this report is produced by a script in that
+  repository and can be reproduced by re-running the pipeline described in
+  <span class="mono">README.md</span>.
+</footer>
