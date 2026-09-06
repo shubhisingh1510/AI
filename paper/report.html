@@ -50,7 +50,7 @@
   --limitation-soft:#331e1c;
 }
 
-*{box-sizing:border-box;}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 body{
   margin:0;
   background:var(--bg);
@@ -58,6 +58,10 @@ body{
   font-family:"Source Sans 3", -apple-system, sans-serif;
   font-size:16px;
   line-height:1.65;
+}
+@media print{
+  section{break-inside:avoid-page;}
+  .gradcam-card, .stat, figure{break-inside:avoid;}
 }
 h1,h2,h3{
   font-family:"Source Serif 4", Georgia, serif;

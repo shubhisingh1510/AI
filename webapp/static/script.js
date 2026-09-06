@@ -1,8 +1,8 @@
 const CLASS_COLORS = {
-  venous: "#7c3aed",
-  diabetic: "#ea580c",
-  pressure: "#0891b2",
-  surgical: "#16a34a",
+  venous: "#8451e0",
+  diabetic: "#e07a2c",
+  pressure: "#0f9db0",
+  surgical: "#16a35f",
 };
 
 let currentFile = null;
@@ -33,25 +33,16 @@ async function loadModelInfo() {
   modelInfo = infoRes;
   classInfoMap = classInfoRes;
 
-  const badgeRow = document.getElementById("badgeRow");
-  badgeRow.innerHTML = "";
-  const classesBadge = document.createElement("div");
-  classesBadge.className = "badge";
-  classesBadge.textContent = "Classes: " + modelInfo.classes.join(", ");
-  badgeRow.appendChild(classesBadge);
-
+  const statStrip = document.getElementById("statStrip");
+  const chips = [];
   if (modelInfo.test_accuracy != null) {
-    const accBadge = document.createElement("div");
-    accBadge.className = "badge";
-    accBadge.textContent = "Held-out test accuracy: " + fmtPct(modelInfo.test_accuracy);
-    badgeRow.appendChild(accBadge);
+    chips.push(`<div class="stat-chip"><span class="dot"></span>Test accuracy <b>${fmtPct(modelInfo.test_accuracy)}</b></div>`);
   }
-  const scopeBadge = document.createElement("div");
-  scopeBadge.className = "badge";
-  scopeBadge.textContent = "Arterial ulcers: not in scope";
-  badgeRow.appendChild(scopeBadge);
+  chips.push(`<div class="stat-chip"><span class="dot"></span>Classes <b>${modelInfo.classes.join(" / ")}</b></div>`);
+  chips.push(`<div class="stat-chip"><span class="dot" style="background:#d1476b"></span>Arterial <b>not in scope</b></div>`);
+  statStrip.innerHTML = chips.join("");
 
-  document.getElementById("disclaimerCard").innerHTML =
+  document.getElementById("footerNote").innerHTML =
     "<strong>Important:</strong> " + modelInfo.disclaimer;
 
   samplesRow.innerHTML = "";
@@ -132,7 +123,7 @@ function renderResult(data) {
 
   let html = "";
   html += `<div class="pred-header">
-      <div class="pred-dot" style="background:${color}"></div>
+      <div class="pred-dot" style="background:${color};color:${color}"></div>
       <div>
         <div class="pred-title">${data.pred_label}</div>
         <div class="pred-confidence">${fmtPct(data.top_confidence)} confidence</div>
@@ -206,10 +197,8 @@ function renderHistory() {
     div.className = "history-item";
     div.innerHTML = `
       <img src="${entry.display_image}" alt="thumb">
-      <div class="meta">
-        <div class="name">${entry.pred_label}</div>
-        <div class="sub">${fmtPct(entry.top_confidence)} &middot; ${entry.time}</div>
-      </div>`;
+      <div class="name">${entry.pred_label.replace(" Ulcer", "").replace(" (Pressure Injury)", "").replace(" / Neuropathic", "")}</div>
+      <div class="sub">${fmtPct(entry.top_confidence)}</div>`;
     div.onclick = () => renderResult(entry.full);
     historyList.appendChild(div);
   });

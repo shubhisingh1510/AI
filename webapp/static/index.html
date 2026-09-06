@@ -9,21 +9,34 @@
 <body>
 
 <div class="topbar">
-  <h1>Lower-Limb / Foot Wound &mdash; Ulcer Type Classifier</h1>
-  <p>Upload a wound photograph to get a predicted ulcer type, per-class confidence, a Grad-CAM
-     visual explanation, and general clinical background on the predicted type.</p>
-  <div class="badge-row" id="badgeRow"></div>
+  <div class="brand-block">
+    <div class="brand-mark">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round">
+        <path d="M12 3v18M4 8l4-4 4 4M20 16l-4 4-4-4"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Ulcer Type Classifier</h1>
+      <p class="sub">Upload a lower-limb or foot wound photo for a predicted ulcer type,
+        confidence breakdown, and a Grad-CAM explanation of what the model looked at.</p>
+    </div>
+  </div>
+  <div class="stat-strip" id="statStrip"></div>
 </div>
 
 <div class="container">
 
   <div class="card">
-    <h2>1. Upload a photo</h2>
+    <div class="step-label">Step 1</div>
+    <h2>Upload a photo</h2>
+    <p class="hint">JPG or PNG works best. Try a sample below if you don't have one handy.</p>
+
     <div class="dropzone" id="dropzone">
-      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
         <path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/>
       </svg>
-      <div>Drag &amp; drop an image here, or click to browse</div>
+      <div class="cta">Drag &amp; drop, or click to browse</div>
+      <div class="cta2">A single wound photo</div>
       <input type="file" id="fileInput" accept="image/*">
     </div>
     <div class="preview-wrap" id="previewWrap">
@@ -34,6 +47,7 @@
       <span id="classifyBtnText">Classify</span>
     </button>
 
+    <div class="samples-label">Try a sample</div>
     <div class="samples" id="samplesRow"></div>
 
     <div class="toggle-row">
@@ -43,30 +57,27 @@
   </div>
 
   <div class="card">
-    <h2>2. Result</h2>
+    <div class="step-label">Step 2</div>
+    <h2>Result</h2>
     <div id="resultEmpty" class="result-empty">
-      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
         <circle cx="12" cy="12" r="9"/><path d="M9 12l2 2 4-4"/>
       </svg>
-      <div>Upload and classify an image to see results here.</div>
+      <div>Your result will appear here.</div>
     </div>
     <div id="resultContent" style="display:none;"></div>
   </div>
 
 </div>
 
-<div class="container" style="grid-template-columns: 1fr;">
-  <div class="card">
-    <h2>Session history</h2>
-    <div class="history-list" id="historyList">
-      <div class="history-empty">No classifications yet this session.</div>
-    </div>
+<div class="history-card">
+  <div class="samples-label" style="margin-top:0;">Session history</div>
+  <div class="history-list" id="historyList">
+    <div class="history-empty">No classifications yet this session.</div>
   </div>
 </div>
 
-<div class="disclaimer">
-  <div class="card" id="disclaimerCard"></div>
-</div>
+<div class="footer-note" id="footerNote"></div>
 
 <script src="script.js"></script>
 </body>
