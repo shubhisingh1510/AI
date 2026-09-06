@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wound Ulcer Type Classifier</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Lower-Limb / Foot Wound &mdash; Ulcer Type Classifier</h1>
+  <p>Upload a wound photograph to get a predicted ulcer type, per-class confidence, a Grad-CAM
+     visual explanation, and general clinical background on the predicted type.</p>
+  <div class="badge-row" id="badgeRow"></div>
+</div>
+
+<div class="container">
+
+  <div class="card">
+    <h2>1. Upload a photo</h2>
+    <div class="dropzone" id="dropzone">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/>
+      </svg>
+      <div>Drag &amp; drop an image here, or click to browse</div>
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+    <div class="preview-wrap" id="previewWrap">
+      <img id="previewImg" alt="preview">
+    </div>
+    <button class="btn btn-primary" id="classifyBtn" disabled>
+      <span class="spinner" id="spinner"></span>
+      <span id="classifyBtnText">Classify</span>
+    </button>
+
+    <div class="samples" id="samplesRow"></div>
+
+    <div class="toggle-row">
+      <input type="checkbox" id="camToggle" checked>
+      <label for="camToggle">Show Grad-CAM heatmap</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Result</h2>
+    <div id="resultEmpty" class="result-empty">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+        <circle cx="12" cy="12" r="9"/><path d="M9 12l2 2 4-4"/>
+      </svg>
+      <div>Upload and classify an image to see results here.</div>
+    </div>
+    <div id="resultContent" style="display:none;"></div>
+  </div>
+
+</div>
+
+<div class="container" style="grid-template-columns: 1fr;">
+  <div class="card">
+    <h2>Session history</h2>
+    <div class="history-list" id="historyList">
+      <div class="history-empty">No classifications yet this session.</div>
+    </div>
+  </div>
+</div>
+
+<div class="disclaimer">
+  <div class="card" id="disclaimerCard"></div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
