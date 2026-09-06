@@ -1,0 +1,9 @@
+# For contributors working ONLY on webapp/static/{index.html,style.css,script.js} -- lets
+# you run the site in mock mode (MOCK_MODEL=1) without installing torch/torchvision/pennylane
+# or downloading the dataset and trained checkpoint. See webapp/README.md.
+#
+# Install with: pip install -r requirements-frontend.txt
+# Run with:     MOCK_MODEL=1 python webapp/server.py
+flask>=3.0
+Pillow>=10.0
+numpy>=1.24,<2.0

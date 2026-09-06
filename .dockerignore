@@ -1,0 +1,10 @@
+.venv/
+.git/
+data/raw/
+data/raw_mendeley_archive/
+data/raw_dfu_archive/
+data/_download/
+data/_download_azh/
+__pycache__/
+*.pyc
+*.log

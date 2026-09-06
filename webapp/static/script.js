@@ -35,6 +35,10 @@ async function loadModelInfo() {
 
   const statStrip = document.getElementById("statStrip");
   const chips = [];
+  if (modelInfo.mock) {
+    chips.push(`<div class="stat-chip" style="background:#fff1f1;color:#a3352b;border-color:#f3c9c5;">
+      <span class="dot" style="background:#a3352b"></span>MOCK MODE <b>no real model loaded</b></div>`);
+  }
   if (modelInfo.test_accuracy != null) {
     chips.push(`<div class="stat-chip"><span class="dot"></span>Test accuracy <b>${fmtPct(modelInfo.test_accuracy)}</b></div>`);
   }
@@ -122,6 +126,11 @@ function renderResult(data) {
   const info = data.class_info || {};
 
   let html = "";
+  if (data.mock) {
+    html += `<div class="uncertain-banner" style="background:#fff1f1;border-color:#f3c9c5;color:#a3352b;">
+      Mock mode: this is a deterministic placeholder, not a real model prediction.
+    </div>`;
+  }
   html += `<div class="pred-header">
       <div class="pred-dot" style="background:${color};color:${color}"></div>
       <div>
