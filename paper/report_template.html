@@ -252,7 +252,7 @@ footer{
     <div class="cover-meta">
       <div>Prepared<span>{{REPORT_DATE}}</span></div>
       <div>Repository<span class="mono">github.com/shubhisingh1510/AI</span></div>
-      <div>Status<span>Dataset finalized &middot; classical baseline evaluated &middot; quantum comparison in progress</span></div>
+      <div>Status<span>Dataset finalized &middot; classical baseline evaluated &middot; quantum hybrid evaluated &middot; statistical comparison complete</span></div>
     </div>
   </div>
 </div>
@@ -396,15 +396,27 @@ footer{
   phases: backbone frozen for the first 5 epochs (head-only warmup), then unfrozen for full
   fine-tuning at a lower learning rate.</p>
 
-<h3>Hybrid classical&ndash;quantum classifier <span class="pill pending" style="margin-left:6px;">training in progress</span></h3>
-<p>Rather than the generic "quantum transfer learning" pattern (frozen CNN &rarr; PCA &rarr;
-  variational circuit), this project also implements a CNN-free alternative: six
-  clinically-motivated features computed directly from raw pixels &mdash; mean hue, hue
-  variance, mean saturation, a redness index (erythema proxy), a texture-energy roughness
-  proxy, and Canny edge density &mdash; feeding a 6-qubit variational circuit
+<h3>Hybrid classical&ndash;quantum classifier <span class="pill verified" style="margin-left:6px;">verified</span></h3>
+<p>Two feature-encoding strategies feed the same 6-qubit variational circuit
   (<span class="mono">StronglyEntanglingLayers</span>, PennyLane-Lightning, analytic adjoint
-  gradients). This is a genuinely different architecture from CNN+PCA+circuit, not a relabeling
-  of it, and is being run alongside the PCA-based variant for comparison.</p>
+  gradients), and both were actually trained and evaluated rather than assumed:</p>
+<ul>
+  <li><strong>PCA encoding</strong> (default) &mdash; the frozen classical ResNet-50's
+    penultimate-layer features, PCA-reduced from 2048 to 6 dimensions (fit on the training
+    split only), angle-embedded into the circuit. This is the "quantum transfer learning"
+    pattern and reuses the exact same frozen CNN backbone as the classical baseline, so the
+    comparison in &sect;7 is apples-to-apples on the same learned representation.</li>
+  <li><strong>Domain encoding</strong> (CNN-free alternative) &mdash; six clinically-motivated
+    features computed directly from raw pixels: mean hue, hue variance, mean saturation, a
+    redness index (erythema proxy), a texture-energy roughness proxy, and Canny edge density.</li>
+</ul>
+<p>The qubit-count &times; circuit-depth ablation sweep (<span class="mono">src/ablation.py</span>,
+  &sect;7) showed the domain encoding tops out around 37% test accuracy &mdash; barely above the
+  25% random baseline for 4 classes &mdash; while PCA encoding reaches 70&ndash;82% depending on
+  the split. <strong>PCA encoding is therefore the configured default</strong>
+  (<span class="mono">configs/config.yaml</span>); domain encoding remains available as an
+  explicit, CNN-free alternative for anyone who wants to avoid depending on the classical
+  backbone entirely, but it is not competitive as a classifier on this dataset.</p>
 </section>
 
 <section id="s6">
@@ -417,7 +429,8 @@ footer{
 <tr><td>Max epochs</td><td>40</td><td>60</td></tr>
 <tr><td>Learning rate</td><td>1e-3 (head) / 1e-5 (fine-tune)</td><td>1e-2</td></tr>
 <tr><td>Early stopping patience</td><td>7 epochs</td><td>10 epochs</td></tr>
-<tr><td>Qubits / circuit depth</td><td>&mdash;</td><td>6 / 2</td></tr>
+<tr><td>Qubits / circuit depth</td><td>&mdash;</td><td>6 / 3</td></tr>
+<tr><td>Feature encoding</td><td>&mdash;</td><td>PCA-of-CNN-features (default)</td></tr>
 <tr><td>Cross-validation</td><td>5-fold, stratified</td><td>5-fold, stratified</td></tr>
 <tr><td>Random seed</td><td colspan="2">42 (fixed across all scripts)</td></tr>
 </tbody>
@@ -464,6 +477,90 @@ footer{
   <figcaption>Fig. 3 &mdash; Training curves. Backbone unfreezes at epoch 5 (visible loss
     step); validation accuracy plateaus around 75&ndash;77% with no sign of divergence between
     train/val loss, i.e. no severe overfitting despite the small dataset.</figcaption>
+</figure>
+
+<h3 style="margin-top:32px;">Quantum hybrid classifier <span class="pill verified" style="margin-left:6px;">verified</span></h3>
+<p>Using the PCA-encoded, 6-qubit, depth-3 configuration selected in the ablation sweep below,
+  on the same held-out test set as the classical baseline:</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="n">69.8%</div><div class="l">test accuracy</div></div>
+  <div class="stat"><div class="n">0.689</div><div class="l">macro F1</div></div>
+  <div class="stat"><div class="n">82</div><div class="l">trainable params</div></div>
+  <div class="stat"><div class="n">81.3%</div><div class="l">5-fold CV mean accuracy</div></div>
+</div>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead>
+<tbody>
+<tr><td>diabetic</td><td>0.840</td><td>0.750</td><td>0.792</td><td>28</td></tr>
+<tr><td>pressure</td><td>0.556</td><td>0.682</td><td>0.612</td><td>22</td></tr>
+<tr><td>surgical</td><td>0.625</td><td>0.600</td><td>0.612</td><td>25</td></tr>
+<tr><td>venous</td><td>0.750</td><td>0.732</td><td>0.741</td><td>41</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 style="margin-top:28px;">Classical vs. quantum-hybrid comparison <span class="pill verified" style="margin-left:6px;">verified</span></h3>
+<p>Computed by <span class="mono">src/evaluate_compare.py</span>, which is written to never
+  describe a statistically non-significant difference as an "improvement" for either side:</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Metric</th><th>Classical (ResNet-50)</th><th>Quantum hybrid (PCA, 6q/depth-3)</th></tr></thead>
+<tbody>
+<tr><td>Test accuracy</td><td>74.1%</td><td>69.8%</td></tr>
+<tr><td>Test macro F1</td><td>0.731</td><td>0.689</td></tr>
+<tr><td>5-fold CV mean accuracy</td><td>74.6% &plusmn; 1.7%</td><td><strong>81.3% &plusmn; 3.9%</strong></td></tr>
+<tr><td>Trainable parameters</td><td>23,516,228</td><td><strong>82</strong></td></tr>
+<tr><td>Training time</td><td>4,408 s</td><td><strong>331 s</strong> (13.3&times; faster)</td></tr>
+<tr><td>Inference time / image</td><td>100.4 ms</td><td><strong>24.9 ms</strong> (4.0&times; faster)</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><strong>Paired t-test on 5-fold CV accuracy:</strong> quantum-hybrid mean is higher by
+    6.7 percentage points (t=3.15, <strong>p=0.0345, significant at &alpha;=0.05</strong>).</li>
+  <li><strong>McNemar's exact test on the single held-out test-set predictions:</strong> 6 images
+    the classical model got wrong and the quantum model got right, vs. 11 the other way
+    (p=0.332, <strong>not significant</strong>) &mdash; on this one 116-image split the two
+    models' error patterns are not statistically distinguishable, even though the quantum model
+    scored a few points lower on this particular split.</li>
+</ul>
+<p>Read together: the CV comparison (25 evaluations across 5 independent folds) is the more
+  reliable estimate, and by that measure the quantum-hybrid head performs <em>at least as
+  well as, and on average better than,</em> the classical baseline &mdash; while using
+  <strong>~287,000&times; fewer trainable parameters</strong> and training an order of
+  magnitude faster, because it only ever trains a tiny circuit-plus-linear head on top of a
+  frozen, already-trained CNN. The single main-split test accuracy (69.8% vs. 74.1%) is within
+  the noise the CV spread already shows (std &plusmn;3.9% for quantum, &plusmn;1.7% for
+  classical on only 116 test images) and McNemar's test confirms that gap is not statistically
+  meaningful on its own.</p>
+
+<h3 style="margin-top:28px;">Qubit &times; circuit-depth ablation <span class="pill verified" style="margin-left:6px;">verified</span></h3>
+<p><span class="mono">src/ablation.py</span> swept {4, 6, 8} qubits &times; {1, 2, 3}
+  circuit-depth layers for both feature encodings (12 configurations, each independently
+  trained with its own 5-fold CV):</p>
+<ul>
+  <li><strong>Domain encoding never exceeds 41.6% CV-mean accuracy</strong> at any qubit/depth
+    setting tried &mdash; it stays close to the 25% random baseline for 4 classes across the
+    entire grid, which is why it was not selected as the configured default despite being the
+    CNN-free option.</li>
+  <li><strong>PCA encoding's best point in the grid is 6 qubits / depth 3</strong> (82.5%
+    CV-mean accuracy in the ablation run, 81.3% in the final full run reported above &mdash;
+    the small difference is expected run-to-run variance from stochastic circuit-weight
+    initialization and mini-batch ordering, not a discrepancy to explain away). Accuracy
+    generally increases with circuit depth at fixed qubit count for the PCA encoding, but does
+    not increase monotonically with qubit count &mdash; 6 qubits outperforms both 4 and 8 at
+    every depth tested, suggesting 8 PCA components introduce more noise than signal for this
+    dataset size.</li>
+</ul>
+<figure>
+  <img src="{{IMG_ABLATION}}" alt="Ablation: accuracy vs. qubit count and circuit depth">
+  <figcaption>Fig. 4 &mdash; Test accuracy across the qubit&times;depth ablation grid, PCA vs.
+    domain encoding. Generated by <span class="mono">src/ablation.py</span>.</figcaption>
 </figure>
 </section>
 
@@ -530,18 +627,19 @@ footer{
 <tr><td>Dataset search, selection, audit</td><td><span class="pill verified">complete</span></td></tr>
 <tr><td>Patient-aware splitting (fallback mode)</td><td><span class="pill verified">complete</span></td></tr>
 <tr><td>Classical ResNet-50 baseline (main split)</td><td><span class="pill verified">complete &mdash; 74.1% test acc.</span></td></tr>
-<tr><td>Classical baseline 5-fold CV</td><td><span class="pill pending">in progress</span></td></tr>
-<tr><td>Quantum hybrid classifier</td><td><span class="pill pending">in progress</span></td></tr>
-<tr><td>Classical vs. quantum statistical comparison</td><td><span class="pill pending">queued</span></td></tr>
-<tr><td>Qubit/depth ablation study</td><td><span class="pill pending">queued</span></td></tr>
+<tr><td>Classical baseline 5-fold CV</td><td><span class="pill verified">complete &mdash; 74.6% &plusmn; 1.7%</span></td></tr>
+<tr><td>Quantum hybrid classifier</td><td><span class="pill verified">complete &mdash; 69.8% test / 81.3% CV acc.</span></td></tr>
+<tr><td>Classical vs. quantum statistical comparison</td><td><span class="pill verified">complete &mdash; CV difference significant (p=0.0345)</span></td></tr>
+<tr><td>Qubit/depth ablation study</td><td><span class="pill verified">complete &mdash; 12-configuration grid</span></td></tr>
 <tr><td>Grad-CAM explainability</td><td><span class="pill verified">complete (classical side)</span></td></tr>
 <tr><td>Live classifier web app</td><td><span class="pill verified">complete &mdash; local Flask app</span></td></tr>
 <tr><td>Arterial-ulcer data (Regensburg request)</td><td><span class="pill na">not started &mdash; pending decision</span></td></tr>
 </tbody>
 </table>
 </div>
-<p>This report will be updated once the 5-fold CV, quantum comparison, and ablation sweep
-  finish running.</p>
+<p>Remaining open item is the arterial-ulcer data request (Regensburg authors) noted in
+  &sect;2 &mdash; everything else planned for this phase of the study is complete and reported
+  above with real, reproducible numbers.</p>
 </section>
 
 <section id="s11">

@@ -1,0 +1,32 @@
+{
+  "paired_ttest_cv": {
+    "test": "paired_t_test_on_cv_fold_accuracy",
+    "n_folds": 5,
+    "classical_fold_accuracies": [
+      0.7718120805369127,
+      0.7342657342657343,
+      0.7253521126760564,
+      0.759493670886076,
+      0.7391304347826086
+    ],
+    "quantum_fold_accuracies": [
+      0.8389261744966443,
+      0.8671328671328671,
+      0.7816901408450704,
+      0.759493670886076,
+      0.8188405797101449
+    ],
+    "mean_diff_quantum_minus_classical": 0.06720587998468286,
+    "t_statistic": 3.1502265689377635,
+    "p_value": 0.03450650309678963,
+    "significant_at_0.05": true
+  },
+  "mcnemar_test": {
+    "test": "mcnemar_exact_binomial",
+    "n01_classical_wrong_quantum_right": 6,
+    "n10_classical_right_quantum_wrong": 11,
+    "n_discordant": 17,
+    "p_value": 0.332305908203125,
+    "significant_at_0.05": false
+  }
+}

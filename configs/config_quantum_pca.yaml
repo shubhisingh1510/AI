@@ -35,17 +35,11 @@ classical:
     hue: 0.02
 
 quantum:
-  feature_encoding: "pca"  # "domain" (6 clinically-motivated features, src/domain_features.py,
+  feature_encoding: "pca"     # "domain" (6 clinically-motivated features, src/domain_features.py,
                                # no CNN backbone needed) or "pca" (generic PCA-of-CNN-features,
                                # the original "quantum transfer learning" pattern). See README.
-                               # Switched default from "domain" to "pca": results/ablation_results.csv
-                               # (qubit x depth sweep, 2026-09-08) shows domain encoding tops out at
-                               # ~0.37 test accuracy (barely above the 0.25 random baseline for 4
-                               # classes) while pca reaches 0.72 test / 0.82 CV-mean at 6 qubits,
-                               # depth 3 -- the best point in the grid. Domain stays available as an
-                               # explicit alternative for anyone who wants the CNN-free variant.
   num_qubits: 6          # domain encoding always produces exactly 6; pca can use any count
-  circuit_depth: 3        # number of StronglyEntanglingLayers; best point in ablation.py's sweep
+  circuit_depth: 2        # number of StronglyEntanglingLayers; ablation.py sweeps this
   pca_dims: 6              # only used when feature_encoding: pca; must equal num_qubits
   batch_size: 32
   epochs: 60

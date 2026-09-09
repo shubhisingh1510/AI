@@ -16,6 +16,8 @@ data/raw_mendeley_archive/
 # Trained model weights / large artifacts (regenerable by running the pipeline)
 results/classical_backbone_state.pt
 results/classical_features.npy
+results_effnet/classical_backbone_state.pt
+results_effnet/classical_features.npy
 
 __pycache__/
 *.pyc

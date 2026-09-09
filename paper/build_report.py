@@ -18,6 +18,7 @@ IMAGE_MAP = {
     "IMG_CLASS_DIST": "figures/class_distribution.png",
     "IMG_CONFUSION": "figures/classical_confusion_matrix.png",
     "IMG_CURVES": "figures/classical_training_curves.png",
+    "IMG_ABLATION": "figures/ablation_qubits_vs_accuracy.png",
     "IMG_GC_DIABETIC_IN": "figures/report_gradcam/diabetic_input.png",
     "IMG_GC_DIABETIC_CAM": "figures/report_gradcam/diabetic_cam.png",
     "IMG_GC_PRESSURE_IN": "figures/report_gradcam/pressure_input.png",

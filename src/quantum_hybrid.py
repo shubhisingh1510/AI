@@ -79,8 +79,8 @@ class HybridHead(nn.Module):
         return self.classifier(q_out)
 
 
-def load_backbone_for_features(model_path_state, n_classes, pretrained, device):
-    model = build_model(n_classes, pretrained).to(device)
+def load_backbone_for_features(model_path_state, n_classes, pretrained, device, backbone="resnet50"):
+    model = build_model(n_classes, pretrained, backbone).to(device)
     if model_path_state is not None:
         model.load_state_dict(model_path_state)
     model.eval()
@@ -214,7 +214,10 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
                 "trained backbone state_dict so quantum_hybrid.py can reuse the SAME frozen CNN)."
             )
         state = torch.load(ckpt_path, map_location=device)
-        backbone = load_backbone_for_features(state, n_classes, cfg["classical"]["pretrained"], device)
+        backbone = load_backbone_for_features(
+            state, n_classes, cfg["classical"]["pretrained"], device,
+            cfg["classical"].get("backbone", "resnet50"),
+        )
         for p in backbone.parameters():
             p.requires_grad = False
 

@@ -80,18 +80,46 @@ def build_transforms(cfg):
     std = cfg["classical"]["imagenet_std"]
     size = cfg["data"]["image_size"]
     cj = cfg["classical"]["color_jitter"]
+    augmentation = cfg["classical"].get("augmentation", "standard")
 
-    train_tf = transforms.Compose([
-        transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(p=0.2),
-        transforms.ColorJitter(
-            brightness=cj["brightness"], contrast=cj["contrast"],
-            saturation=cj["saturation"], hue=cj["hue"],
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
-    ])
+    if augmentation == "heavy":
+        # Matches the augmentation recipe reported in Chowdhury et al., "Eff-ReLU-Net: a deep
+        # learning framework for multiclass wound classification" (PMC12220098), the only
+        # published result found on this exact AZH 4-class dataset that reaches ~90% accuracy:
+        # fixed 90/180/270 rotations + continuous random rotation + translation + elastic
+        # deformation + gamma correction, on top of the crop/flip/jitter already used here.
+        train_tf = transforms.Compose([
+            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(p=0.2),
+            transforms.RandomChoice([
+                transforms.RandomRotation((angle, angle)) for angle in (0, 90, 180, 270)
+            ]),
+            transforms.RandomRotation(15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            transforms.ElasticTransform(alpha=50.0),
+            transforms.ColorJitter(
+                brightness=cj["brightness"], contrast=cj["contrast"],
+                saturation=cj["saturation"], hue=cj["hue"],
+            ),
+            transforms.Lambda(
+                lambda img: transforms.functional.adjust_gamma(img, gamma=float(np.random.uniform(0.8, 1.2)))
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+    else:
+        train_tf = transforms.Compose([
+            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(p=0.2),
+            transforms.ColorJitter(
+                brightness=cj["brightness"], contrast=cj["contrast"],
+                saturation=cj["saturation"], hue=cj["hue"],
+            ),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
     eval_tf = transforms.Compose([
         transforms.Resize(int(size * 1.14)),
         transforms.CenterCrop(size),
@@ -101,19 +129,58 @@ def build_transforms(cfg):
     return train_tf, eval_tf
 
 
-def build_model(num_classes: int, pretrained: bool):
-    weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
-    model = models.resnet50(weights=weights)
-    for p in model.parameters():
-        p.requires_grad = False
-    in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, num_classes)
-    return model
+def _replace_silu_with_relu(module: nn.Module):
+    """EfficientNet uses SiLU (Swish) activations everywhere; Eff-ReLU-Net's finding is that
+    swapping these for ReLU improves accuracy/efficiency on this dataset. Recurses through
+    every submodule since SiLU is used inside MBConv blocks, not just at the top level."""
+    for name, child in module.named_children():
+        if isinstance(child, nn.SiLU):
+            setattr(module, name, nn.ReLU(inplace=True))
+        else:
+            _replace_silu_with_relu(child)
+
+
+def build_model(num_classes: int, pretrained: bool, backbone: str = "resnet50"):
+    if backbone == "resnet50":
+        weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        model = models.resnet50(weights=weights)
+        for p in model.parameters():
+            p.requires_grad = False
+        in_features = model.fc.in_features
+        model.fc = nn.Linear(in_features, num_classes)
+        return model
+    elif backbone == "efficientnet_b0_relu":
+        # Reproduces Eff-ReLU-Net (Chowdhury et al., PMC12220098): EfficientNet-B0 backbone,
+        # Swish->ReLU everywhere, and a 512->256->128->n_classes dense head instead of a
+        # single linear layer, which is the published recipe reaching 90% on this AZH dataset.
+        weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+        model = models.efficientnet_b0(weights=weights)
+        for p in model.parameters():
+            p.requires_grad = False
+        _replace_silu_with_relu(model)
+        in_features = model.classifier[1].in_features
+        model.classifier = nn.Sequential(
+            nn.Dropout(p=0.2, inplace=True),
+            nn.Linear(in_features, 512), nn.ReLU(inplace=True),
+            nn.Linear(512, 256), nn.ReLU(inplace=True),
+            nn.Linear(256, 128), nn.ReLU(inplace=True),
+            nn.Linear(128, num_classes),
+        )
+        return model
+    else:
+        raise ValueError(f"Unknown classical.backbone {backbone!r}; expected 'resnet50' or 'efficientnet_b0_relu'")
+
+
+def head_attr_name(model) -> str:
+    """Name of the final classification submodule -- 'fc' for resnet50, 'classifier' for
+    efficientnet -- so the rest of the file can stay architecture-agnostic."""
+    return "fc" if hasattr(model, "fc") else "classifier"
 
 
 def set_backbone_trainable(model, trainable: bool):
+    prefix = head_attr_name(model)
     for name, p in model.named_parameters():
-        if "fc" in name:
+        if name.startswith(prefix):
             continue
         p.requires_grad = trainable
 
@@ -151,6 +218,14 @@ def compute_class_weights(dataset, n_classes: int, device) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
 
+def make_optimizer(params, ccfg, lr):
+    if ccfg.get("optimizer", "adam") == "sgd":
+        return torch.optim.SGD(
+            params, lr=lr, momentum=ccfg.get("momentum", 0.9), weight_decay=ccfg["weight_decay"],
+        )
+    return torch.optim.Adam(params, lr=lr, weight_decay=ccfg["weight_decay"])
+
+
 def train_classical(model, train_loader, val_loader, cfg, device):
     ccfg = cfg["classical"]
     n_classes = len(train_loader.dataset.label_to_idx)
@@ -162,9 +237,8 @@ def train_classical(model, train_loader, val_loader, cfg, device):
     patience_counter = 0
     unfrozen = False
 
-    optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=ccfg["lr_head"], weight_decay=ccfg["weight_decay"],
+    optimizer = make_optimizer(
+        filter(lambda p: p.requires_grad, model.parameters()), ccfg, ccfg["lr_head"],
     )
 
     for epoch in range(ccfg["epochs"]):
@@ -172,9 +246,7 @@ def train_classical(model, train_loader, val_loader, cfg, device):
             print(f"Epoch {epoch}: unfreezing backbone for full fine-tuning.")
             set_backbone_trainable(model, True)
             unfrozen = True
-            optimizer = torch.optim.Adam(
-                model.parameters(), lr=ccfg["lr_finetune"], weight_decay=ccfg["weight_decay"],
-            )
+            optimizer = make_optimizer(model.parameters(), ccfg, ccfg["lr_finetune"])
 
         train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, True)
         val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, device, False)
@@ -205,13 +277,16 @@ def train_classical(model, train_loader, val_loader, cfg, device):
 def extract_features_and_predict(model, loader, device):
     """Returns penultimate-layer features, logits/probs, predictions, labels, filenames."""
     model.eval()
-    feature_extractor = nn.Sequential(*list(model.children())[:-1])  # drop fc -> (B, 2048, 1, 1)
+    prefix = head_attr_name(model)
+    head = getattr(model, prefix)
+    # Drop the head submodule (fc / classifier) and keep everything else, in original order.
+    feature_extractor = nn.Sequential(*[m for name, m in model.named_children() if name != prefix])
 
     all_features, all_probs, all_preds, all_labels, all_files = [], [], [], [], []
     for imgs, labels, files in loader:
         imgs = imgs.to(device)
-        feats = feature_extractor(imgs).flatten(1)  # (B, 2048)
-        logits = model.fc(feats)
+        feats = feature_extractor(imgs).flatten(1)
+        logits = head(feats)
         probs = torch.softmax(logits, dim=1)
         preds = probs.argmax(dim=1)
 
@@ -367,7 +442,7 @@ def main():
         batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
     )
 
-    model = build_model(n_classes, ccfg["pretrained"]).to(device)
+    model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50")).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable_start = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {n_params:,} total, {n_trainable_start:,} trainable at start.")
@@ -414,7 +489,7 @@ def main():
                 WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root),
                 batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
             )
-            fold_model = build_model(n_classes, ccfg["pretrained"]).to(device)
+            fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50")).to(device)
             fold_model, _ = train_classical(fold_model, fold_train_loader, fold_test_loader, cfg, device)
             _, fp, fpred, flabels, _ = extract_features_and_predict(fold_model, fold_test_loader, device)
             fold_metrics = compute_metrics(flabels, fpred, fp, n_classes)
