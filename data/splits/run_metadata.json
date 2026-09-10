@@ -2,7 +2,7 @@
   "seed": 42,
   "split_method": "stratified_image_level_fallback",
   "has_patient_ids_csv": false,
-  "n_images": 730,
+  "n_images": 891,
   "n_classes": 4,
   "classes": [
     "diabetic",
@@ -10,7 +10,7 @@
     "surgical",
     "venous"
   ],
-  "n_patients": 398,
+  "n_patients": 559,
   "train_frac": 0.7,
   "val_frac": 0.15,
   "test_frac": 0.15,
