@@ -68,7 +68,14 @@ def attach_patient_ids(df: pd.DataFrame, patient_csv: Path) -> tuple[pd.DataFram
         return merged, True
     else:
         df = df.copy()
-        df["patient_id"] = df["filename"]
+        # Use "label/filename" as the fallback proxy key, not bare filename -- bare filenames
+        # collide across class folders in this dataset (e.g. "test_100_0.jpg" exists under both
+        # diabetic/ and pressure/), which previously caused unrelated images from DIFFERENT
+        # classes to be silently grouped as if they were the same "patient" and forced into the
+        # same split. Discovered 2026-09-16: 191 of 559 fallback groups in a prior split spanned
+        # more than one class label. "label/filename" is unique per image, so each image is its
+        # own fallback group again, as the "one row = one pseudo-patient" fallback intends.
+        df["patient_id"] = df["label"] + "/" + df["filename"]
         return df, False
 
 

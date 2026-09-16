@@ -140,14 +140,17 @@ def _replace_silu_with_relu(module: nn.Module):
             _replace_silu_with_relu(child)
 
 
-def build_model(num_classes: int, pretrained: bool, backbone: str = "resnet50"):
+def build_model(num_classes: int, pretrained: bool, backbone: str = "resnet50", head_dropout: float = 0.0):
     if backbone == "resnet50":
         weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
         model = models.resnet50(weights=weights)
         for p in model.parameters():
             p.requires_grad = False
         in_features = model.fc.in_features
-        model.fc = nn.Linear(in_features, num_classes)
+        # Dropout has no learnable params, so wrapping it with the Linear head here doesn't
+        # change state_dict keys regardless of head_dropout's value (fc.0 = Dropout, fc.1 =
+        # Linear) -- callers that load a checkpoint without specifying head_dropout still work.
+        model.fc = nn.Sequential(nn.Dropout(p=head_dropout), nn.Linear(in_features, num_classes))
         return model
     elif backbone == "efficientnet_b0_relu":
         # Reproduces Eff-ReLU-Net (Chowdhury et al., PMC12220098): EfficientNet-B0 backbone,
@@ -226,23 +229,75 @@ def make_optimizer(params, ccfg, lr):
     return torch.optim.Adam(params, lr=lr, weight_decay=ccfg["weight_decay"])
 
 
+# Order to gradually unfreeze ResNet-50's blocks in, latest (most task-specific) first -- the
+# standard transfer-learning heuristic for discriminative fine-tuning.
+RESNET_UNFREEZE_ORDER = ["layer4", "layer3", "layer2", "layer1", "conv1_bn1"]
+
+
+def resnet_block_modules(model, block_name: str):
+    if block_name == "conv1_bn1":
+        return [model.conv1, model.bn1]
+    return [getattr(model, block_name)]
+
+
+def set_resnet_block_trainable(model, block_name: str, trainable: bool):
+    for m in resnet_block_modules(model, block_name):
+        for p in m.parameters():
+            p.requires_grad = trainable
+
+
+def build_discriminative_optimizer(model, ccfg, unfrozen_blocks: list):
+    """Adam/SGD with one param group per already-unfrozen block, each at
+    lr_finetune * lr_finetune_decay_per_block**i (i=0 for the first/most-recently-task-relevant
+    block unfrozen, decaying for earlier, more generic blocks), plus the head at lr_head."""
+    head = getattr(model, head_attr_name(model))
+    decay = ccfg.get("lr_finetune_decay_per_block", 0.3)
+    param_groups = [{"params": list(head.parameters()), "lr": ccfg["lr_head"]}]
+    for i, block in enumerate(unfrozen_blocks):
+        block_lr = ccfg["lr_finetune"] * (decay ** i)
+        params = [p for m in resnet_block_modules(model, block) for p in m.parameters()]
+        param_groups.append({"params": params, "lr": block_lr})
+    if ccfg.get("optimizer", "adam") == "sgd":
+        return torch.optim.SGD(
+            param_groups, momentum=ccfg.get("momentum", 0.9), weight_decay=ccfg["weight_decay"],
+        )
+    return torch.optim.Adam(param_groups, weight_decay=ccfg["weight_decay"])
+
+
 def train_classical(model, train_loader, val_loader, cfg, device):
     ccfg = cfg["classical"]
     n_classes = len(train_loader.dataset.label_to_idx)
     class_weights = compute_class_weights(train_loader.dataset, n_classes, device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=ccfg.get("label_smoothing", 0.0))
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_val_loss = float("inf")
     best_state = None
     patience_counter = 0
     unfrozen = False
 
+    # Gradual unfreezing (one ResNet block at a time, with discriminative per-block learning
+    # rates) is only implemented for resnet50's named block structure; other backbones keep the
+    # original single-step "unfreeze everything at freeze_backbone_epochs" schedule.
+    gradual = ccfg.get("gradual_unfreezing", False) and head_attr_name(model) == "fc"
+    unfrozen_blocks = []  # populated in unfreeze order as gradual unfreezing progresses
+
     optimizer = make_optimizer(
         filter(lambda p: p.requires_grad, model.parameters()), ccfg, ccfg["lr_head"],
     )
 
     for epoch in range(ccfg["epochs"]):
-        if ccfg["unfreeze_after"] and not unfrozen and epoch == ccfg["freeze_backbone_epochs"]:
+        if gradual:
+            remaining = [b for b in ccfg.get("unfreeze_blocks", RESNET_UNFREEZE_ORDER) if b not in unfrozen_blocks]
+            every_n = ccfg.get("unfreeze_every_n_epochs", 3)
+            epochs_since_start = epoch - ccfg["freeze_backbone_epochs"]
+            if remaining and epochs_since_start >= 0 and epochs_since_start % every_n == 0:
+                block = remaining[0]
+                unfrozen_blocks.append(block)
+                block_lr = ccfg["lr_finetune"] * (ccfg.get("lr_finetune_decay_per_block", 0.3) ** (len(unfrozen_blocks) - 1))
+                print(f"Epoch {epoch}: gradually unfreezing ResNet block '{block}' at lr={block_lr:.2e}.")
+                set_resnet_block_trainable(model, block, True)
+                optimizer = build_discriminative_optimizer(model, ccfg, unfrozen_blocks)
+        elif ccfg["unfreeze_after"] and not unfrozen and epoch == ccfg["freeze_backbone_epochs"]:
             print(f"Epoch {epoch}: unfreezing backbone for full fine-tuning.")
             set_backbone_trainable(model, True)
             unfrozen = True
@@ -380,7 +435,14 @@ def main():
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--smoke-test", action="store_true",
                          help="Run 1 epoch on a tiny subset to verify the pipeline executes.")
+    parser.add_argument("--splits-metadata", default="run_metadata.json",
+                         help="Which data/splits/*.json to read (e.g. run_metadata_groupsafe.json "
+                              "for the dedupe/group-safe split from dedupe_and_group_split.py).")
+    parser.add_argument("--output-suffix", default="",
+                         help="Appended to all output filenames (e.g. '_groupsafe') so a rerun on "
+                              "a different split does not overwrite the original results.")
     args = parser.parse_args()
+    suf = args.output_suffix
 
     script_dir = Path(__file__).resolve().parent
     research_root = script_dir.parent
@@ -395,9 +457,10 @@ def main():
     print(f"Device: {device}")
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
-    meta_path = splits_dir / "run_metadata.json"
+    meta_path = splits_dir / args.splits_metadata
     if not meta_path.exists():
-        print("No splits found. Run src/data_prep.py first.")
+        print(f"No splits found at {meta_path}. Run src/data_prep.py "
+              f"(or src/dedupe_and_group_split.py) first.")
         return
     with open(meta_path) as f:
         meta = json.load(f)
@@ -442,7 +505,7 @@ def main():
         batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
     )
 
-    model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50")).to(device)
+    model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0)).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable_start = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {n_params:,} total, {n_trainable_start:,} trainable at start.")
@@ -451,7 +514,7 @@ def main():
     model, history = train_classical(model, train_loader, val_loader, cfg, device)
     train_time_s = time.time() - t0
 
-    plot_training_curves(history, figures_dir / "classical_training_curves.png")
+    plot_training_curves(history, figures_dir / f"classical_training_curves{suf}.png")
 
     t0 = time.time()
     feats, probs, preds, labels, files = extract_features_and_predict(model, test_loader, device)
@@ -460,11 +523,11 @@ def main():
 
     test_metrics = compute_metrics(labels, preds, probs, n_classes)
     plot_confusion_matrix(np.array(test_metrics["confusion_matrix"]), classes,
-                           figures_dir / "classical_confusion_matrix.png")
+                           figures_dir / f"classical_confusion_matrix{suf}.png")
 
-    np.save(results_dir / "classical_features.npy", feats)
-    torch.save(model.state_dict(), results_dir / "classical_backbone_state.pt")
-    with open(results_dir / "classical_test_predictions.json", "w") as f:
+    np.save(results_dir / f"classical_features{suf}.npy", feats)
+    torch.save(model.state_dict(), results_dir / f"classical_backbone_state{suf}.pt")
+    with open(results_dir / f"classical_test_predictions{suf}.json", "w") as f:
         json.dump({
             "filenames": files,
             "y_true": labels.tolist(),
@@ -489,7 +552,7 @@ def main():
                 WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root),
                 batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
             )
-            fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50")).to(device)
+            fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0)).to(device)
             fold_model, _ = train_classical(fold_model, fold_train_loader, fold_test_loader, cfg, device)
             _, fp, fpred, flabels, _ = extract_features_and_predict(fold_model, fold_test_loader, device)
             fold_metrics = compute_metrics(flabels, fpred, fp, n_classes)
@@ -502,6 +565,7 @@ def main():
     output = {
         "model": "resnet50_classical_baseline",
         "seed": cfg["seed"],
+        "splits_metadata_file": args.splits_metadata,
         "split_method": meta["split_method"],
         "class_imbalance_strategy": "inverse_frequency_weighted_cross_entropy_loss",
         "n_params": int(n_params),
@@ -515,7 +579,8 @@ def main():
         "history": history,
         "smoke_test": args.smoke_test,
     }
-    with open(results_dir / "classical_metrics.json", "w") as f:
+    metrics_path = results_dir / f"classical_metrics{suf}.json"
+    with open(metrics_path, "w") as f:
         json.dump(output, f, indent=2)
 
     print("\n=== Classical baseline summary ===")
@@ -523,7 +588,7 @@ def main():
     print(f"Test F1 (macro): {test_metrics['f1_macro']:.4f}")
     if cv_results:
         print(f"CV accuracy: {output['cv_mean_accuracy']:.4f} +/- {output['cv_std_accuracy']:.4f}")
-    print(f"Saved: {results_dir/'classical_metrics.json'}, {results_dir/'classical_features.npy'}")
+    print(f"Saved: {metrics_path}, {results_dir / f'classical_features{suf}.npy'}")
 
 
 if __name__ == "__main__":

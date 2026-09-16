@@ -3,10 +3,13 @@ import pandas as pd
 import torch
 
 from classical_baseline import (
+    RESNET_UNFREEZE_ORDER,
     WoundImageDataset,
+    build_discriminative_optimizer,
     build_model,
     compute_class_weights,
     compute_metrics,
+    set_resnet_block_trainable,
 )
 
 
@@ -23,6 +26,48 @@ def test_build_model_freezes_backbone_by_default():
     fc_params = [p for name, p in model.named_parameters() if "fc" in name]
     assert all(not p.requires_grad for p in non_fc_params)
     assert all(p.requires_grad for p in fc_params)
+
+
+def test_build_model_with_head_dropout_has_identical_state_dict_keys_to_zero_dropout():
+    # Dropout has no learnable params -- a checkpoint trained with head_dropout > 0 must still
+    # load cleanly into a model built with the default head_dropout=0.0 (e.g. quantum_hybrid.py
+    # loading classical_baseline.py's saved backbone).
+    m0 = build_model(num_classes=4, pretrained=False, head_dropout=0.0)
+    m1 = build_model(num_classes=4, pretrained=False, head_dropout=0.5)
+    assert set(m0.state_dict().keys()) == set(m1.state_dict().keys())
+
+
+def test_set_resnet_block_trainable_only_touches_the_named_block():
+    model = build_model(num_classes=4, pretrained=False)
+    set_resnet_block_trainable(model, "layer4", True)
+    for name, p in model.named_parameters():
+        if name.startswith("layer4"):
+            assert p.requires_grad
+        elif name.startswith("fc"):
+            assert p.requires_grad  # head is trainable from build_model's default
+        else:
+            assert not p.requires_grad
+
+
+def test_build_discriminative_optimizer_assigns_decaying_lr_per_unfrozen_block():
+    model = build_model(num_classes=4, pretrained=False)
+    ccfg = {"lr_head": 0.001, "lr_finetune": 0.01, "lr_finetune_decay_per_block": 0.5,
+            "weight_decay": 0.0, "optimizer": "adam"}
+    unfrozen = ["layer4", "layer3"]
+    for b in unfrozen:
+        set_resnet_block_trainable(model, b, True)
+    opt = build_discriminative_optimizer(model, ccfg, unfrozen)
+    lrs = [g["lr"] for g in opt.param_groups]
+    # head group + one group per unfrozen block, in RESNET_UNFREEZE_ORDER's earlier-block=later
+    # index convention: layer4 (i=0) gets lr_finetune, layer3 (i=1) gets lr_finetune*0.5.
+    assert lrs[0] == ccfg["lr_head"]
+    assert lrs[1] == ccfg["lr_finetune"]
+    assert abs(lrs[2] - ccfg["lr_finetune"] * 0.5) < 1e-12
+
+
+def test_resnet_unfreeze_order_starts_with_last_block():
+    assert RESNET_UNFREEZE_ORDER[0] == "layer4"
+    assert RESNET_UNFREEZE_ORDER[-1] == "conv1_bn1"
 
 
 def test_wound_image_dataset_getitem_returns_labeled_tensor(tmp_path, make_image, toy_raw_dir):

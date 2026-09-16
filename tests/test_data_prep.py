@@ -33,8 +33,24 @@ def test_attach_patient_ids_fallback_when_csv_missing(tmp_path, toy_raw_dir):
     df = scan_raw_dir(toy_raw_dir, [".jpg"])
     out, has_ids = attach_patient_ids(df, tmp_path / "no_such_patient_ids.csv")
     assert has_ids is False
-    # fallback treats every image as its own patient
-    assert (out["patient_id"] == out["filename"]).all()
+    # fallback treats every image as its own patient, keyed by "label/filename" (not bare
+    # filename, which can collide across class folders -- see data_prep.py's comment)
+    assert (out["patient_id"] == out["label"] + "/" + out["filename"]).all()
+    assert out["patient_id"].nunique() == len(out)
+
+
+def test_attach_patient_ids_fallback_does_not_merge_same_named_files_across_classes(
+    tmp_path, make_image
+):
+    # Regression test: bare filenames can collide across class folders (e.g. this dataset has
+    # both diabetic/test_100_0.jpg and pressure/test_100_0.jpg) -- a same-named image in a
+    # DIFFERENT class must never be treated as the same fallback "patient".
+    raw_dir = tmp_path / "data" / "raw"
+    make_image(raw_dir / "diabetic" / "shared_name.jpg")
+    make_image(raw_dir / "pressure" / "shared_name.jpg")
+    df = scan_raw_dir(raw_dir, [".jpg"])
+    out, has_ids = attach_patient_ids(df, tmp_path / "no_such_patient_ids.csv")
+    assert out["patient_id"].nunique() == 2
 
 
 def test_attach_patient_ids_uses_real_csv_when_present(tmp_path, toy_raw_dir):
