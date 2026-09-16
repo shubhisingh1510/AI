@@ -82,6 +82,14 @@ class HybridHead(nn.Module):
 def load_backbone_for_features(model_path_state, n_classes, pretrained, device, backbone="resnet50"):
     model = build_model(n_classes, pretrained, backbone).to(device)
     if model_path_state is not None:
+        # Checkpoints saved before classical_baseline.py wrapped the resnet50 head in
+        # Sequential(Dropout, Linear) (to make head_dropout configurable without changing
+        # checkpoint compatibility) used a flat "fc.weight"/"fc.bias" Linear layer. Remap those
+        # old-style keys transparently so old checkpoints still load into the current model.
+        if "fc.weight" in model_path_state and "fc.1.weight" not in model_path_state:
+            model_path_state = dict(model_path_state)
+            model_path_state["fc.1.weight"] = model_path_state.pop("fc.weight")
+            model_path_state["fc.1.bias"] = model_path_state.pop("fc.bias")
         model.load_state_dict(model_path_state)
     model.eval()
     return model

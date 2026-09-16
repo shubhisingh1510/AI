@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from quantum_hybrid import HybridHead, build_quantum_layer
+from quantum_hybrid import HybridHead, build_quantum_layer, load_backbone_for_features
 
 
 def test_quantum_layer_output_dim_matches_num_qubits():
@@ -16,6 +16,23 @@ def test_hybrid_head_forward_shape_matches_n_classes():
     x = torch.randn(2, 4)
     out = head(x)
     assert out.shape == (2, 3)
+
+
+def test_load_backbone_for_features_accepts_old_style_flat_fc_checkpoint():
+    # Checkpoints saved before classical_baseline.py wrapped the head in
+    # Sequential(Dropout, Linear) used flat "fc.weight"/"fc.bias" keys -- must still load.
+    device = torch.device("cpu")
+    old_style_model = torch.nn.Module()
+    import torchvision.models as tv_models
+    ref = tv_models.resnet50(weights=None)
+    ref.fc = torch.nn.Linear(ref.fc.in_features, 4)
+    old_state = ref.state_dict()  # has flat "fc.weight"/"fc.bias"
+
+    model = load_backbone_for_features(old_state, n_classes=4, pretrained=False, device=device)
+    assert "fc.1.weight" in model.state_dict()
+    x = torch.randn(1, 3, 224, 224)
+    out = model(x)
+    assert out.shape == (1, 4)
 
 
 def test_hybrid_head_is_trainable_end_to_end():
