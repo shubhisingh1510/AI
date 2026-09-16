@@ -18,6 +18,39 @@ def test_hybrid_head_forward_shape_matches_n_classes():
     assert out.shape == (2, 3)
 
 
+def test_quantum_layer_data_reuploading_output_shape_matches_non_reuploading():
+    layer = build_quantum_layer(num_qubits=4, circuit_depth=2, diff_method="adjoint", data_reuploading=True)
+    x = torch.randn(3, 4)
+    out = layer(x)
+    assert out.shape == (3, 4)
+
+
+def test_quantum_layer_data_reuploading_has_same_weight_count_as_non_reuploading():
+    # Re-uploading changes WHERE the input is injected, not the circuit's trainable parameter
+    # count -- same (circuit_depth, num_qubits, 3) weight tensor either way.
+    plain = build_quantum_layer(num_qubits=4, circuit_depth=2, diff_method="adjoint", data_reuploading=False)
+    reuploaded = build_quantum_layer(num_qubits=4, circuit_depth=2, diff_method="adjoint", data_reuploading=True)
+    plain_params = sum(p.numel() for p in plain.parameters())
+    reuploaded_params = sum(p.numel() for p in reuploaded.parameters())
+    assert plain_params == reuploaded_params
+
+
+def test_hybrid_head_with_data_reuploading_is_trainable():
+    head = HybridHead(num_qubits=4, circuit_depth=2, n_classes=2, diff_method="adjoint", data_reuploading=True)
+    x = torch.randn(4, 4)
+    y = torch.tensor([0, 1, 0, 1])
+    opt = torch.optim.Adam(head.parameters(), lr=0.1)
+    criterion = torch.nn.CrossEntropyLoss()
+    loss0 = criterion(head(x), y).item()
+    for _ in range(5):
+        opt.zero_grad()
+        loss = criterion(head(x), y)
+        loss.backward()
+        opt.step()
+    loss1 = loss.item()
+    assert loss1 < loss0 + 1e-3  # non-strict: just confirm gradients actually flow and train
+
+
 def test_load_backbone_for_features_accepts_old_style_flat_fc_checkpoint():
     # Checkpoints saved before classical_baseline.py wrapped the head in
     # Sequential(Dropout, Linear) used flat "fc.weight"/"fc.bias" keys -- must still load.

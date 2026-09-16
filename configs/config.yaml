@@ -67,6 +67,9 @@ quantum:
   num_qubits: 6          # domain encoding always produces exactly 6; pca can use any count
   circuit_depth: 3        # number of StronglyEntanglingLayers; best point in ablation.py's sweep
   pca_dims: 6              # only used when feature_encoding: pca; must equal num_qubits
+  data_reuploading: false  # re-inject AngleEmbedding(x) before every entangling layer instead of
+                             # once at the input (Perez-Salinas et al. 2020); opt-in, see
+                             # ablation.py's reuploading axis and quantum_hybrid.py's docstring
   batch_size: 32
   epochs: 60
   lr: 0.01

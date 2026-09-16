@@ -53,14 +53,29 @@ from classical_baseline import (
 from domain_features import N_DOMAIN_FEATURES, extract_domain_features_for_df
 
 
-def build_quantum_layer(num_qubits: int, circuit_depth: int, diff_method: str):
+def build_quantum_layer(num_qubits: int, circuit_depth: int, diff_method: str,
+                         data_reuploading: bool = False):
+    """data_reuploading=False (default): the original circuit -- AngleEmbedding once, then
+    circuit_depth StronglyEntanglingLayers. data_reuploading=True: re-injects AngleEmbedding(x)
+    before EACH of the circuit_depth entangling layers (Perez-Salinas et al. 2020's "data
+    re-uploading" pattern), on the ablation-backed hypothesis that giving the circuit repeated
+    access to the input at fixed qubit count is more promising than adding qubits -- see
+    ablation.py, where the existing qubit x depth sweep already shows 8 qubits underperforming 6."""
     dev = qml.device("lightning.qubit", wires=num_qubits)
 
-    @qml.qnode(dev, interface="torch", diff_method=diff_method)
-    def circuit(inputs, weights):
-        qml.AngleEmbedding(inputs, wires=range(num_qubits), rotation="Y")
-        qml.StronglyEntanglingLayers(weights, wires=range(num_qubits))
-        return [qml.expval(qml.PauliZ(w)) for w in range(num_qubits)]
+    if data_reuploading:
+        @qml.qnode(dev, interface="torch", diff_method=diff_method)
+        def circuit(inputs, weights):
+            for layer_idx in range(circuit_depth):
+                qml.AngleEmbedding(inputs, wires=range(num_qubits), rotation="Y")
+                qml.StronglyEntanglingLayers(weights[layer_idx:layer_idx + 1], wires=range(num_qubits))
+            return [qml.expval(qml.PauliZ(w)) for w in range(num_qubits)]
+    else:
+        @qml.qnode(dev, interface="torch", diff_method=diff_method)
+        def circuit(inputs, weights):
+            qml.AngleEmbedding(inputs, wires=range(num_qubits), rotation="Y")
+            qml.StronglyEntanglingLayers(weights, wires=range(num_qubits))
+            return [qml.expval(qml.PauliZ(w)) for w in range(num_qubits)]
 
     weight_shapes = {"weights": (circuit_depth, num_qubits, 3)}
     return qml.qnn.TorchLayer(circuit, weight_shapes)
@@ -69,9 +84,10 @@ def build_quantum_layer(num_qubits: int, circuit_depth: int, diff_method: str):
 class HybridHead(nn.Module):
     """PCA-reduced features -> variational quantum circuit -> linear classifier head."""
 
-    def __init__(self, num_qubits: int, circuit_depth: int, n_classes: int, diff_method: str):
+    def __init__(self, num_qubits: int, circuit_depth: int, n_classes: int, diff_method: str,
+                 data_reuploading: bool = False):
         super().__init__()
-        self.quantum_layer = build_quantum_layer(num_qubits, circuit_depth, diff_method)
+        self.quantum_layer = build_quantum_layer(num_qubits, circuit_depth, diff_method, data_reuploading)
         self.classifier = nn.Linear(num_qubits, n_classes)
 
     def forward(self, x):
@@ -170,7 +186,7 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg, d
 
 
 def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_depth=None,
-                         feature_encoding=None, smoke_test=False):
+                         feature_encoding=None, smoke_test=False, data_reuploading=None):
     """
     Full pipeline: load classical checkpoint's features (or recompute from a fresh classical
     checkpoint), PCA-fit on train, train hybrid head, evaluate on test + CV folds.
@@ -184,6 +200,8 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
         qcfg["circuit_depth"] = circuit_depth
     if feature_encoding is not None:
         qcfg["feature_encoding"] = feature_encoding
+    if data_reuploading is not None:
+        qcfg["data_reuploading"] = data_reuploading
     if smoke_test:
         qcfg["epochs"] = 1
         qcfg["early_stopping_patience"] = 1
@@ -278,7 +296,8 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
     val_feats = val_feats * scale
     test_feats = test_feats * scale
 
-    head = HybridHead(qcfg["num_qubits"], qcfg["circuit_depth"], n_classes, qcfg["diff_method"]).to(device)
+    head = HybridHead(qcfg["num_qubits"], qcfg["circuit_depth"], n_classes, qcfg["diff_method"],
+                       qcfg.get("data_reuploading", False)).to(device)
     n_params = sum(p.numel() for p in head.parameters())
 
     t0 = time.time()
@@ -318,7 +337,7 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
             ft, fte = ft * fold_scale, fte * fold_scale
 
             fold_head = HybridHead(qcfg["num_qubits"], qcfg["circuit_depth"], n_classes,
-                                    qcfg["diff_method"]).to(device)
+                                    qcfg["diff_method"], qcfg.get("data_reuploading", False)).to(device)
             fold_head, _ = train_hybrid(fold_head, ft, ft_labels, fte, fte_labels, qcfg, device)
             with torch.no_grad():
                 fte_x = torch.tensor(fte, dtype=torch.float32).to(device)
@@ -334,6 +353,7 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
         "feature_encoding": feature_encoding,
         "num_qubits": qcfg["num_qubits"],
         "circuit_depth": qcfg["circuit_depth"],
+        "data_reuploading": qcfg.get("data_reuploading", False),
         "n_params": int(n_params),
         "train_time_s": train_time_s,
         "inference_time_s_total_test": inference_time_s,
