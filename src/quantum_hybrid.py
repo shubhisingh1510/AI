@@ -186,7 +186,8 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg, d
 
 
 def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_depth=None,
-                         feature_encoding=None, smoke_test=False, data_reuploading=None):
+                         feature_encoding=None, smoke_test=False, data_reuploading=None,
+                         splits_metadata="run_metadata.json", output_suffix=""):
     """
     Full pipeline: load classical checkpoint's features (or recompute from a fresh classical
     checkpoint), PCA-fit on train, train hybrid head, evaluate on test + CV folds.
@@ -218,7 +219,7 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
         )
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
-    meta_path = splits_dir / "run_metadata.json"
+    meta_path = splits_dir / splits_metadata
     with open(meta_path) as f:
         meta = json.load(f)
     classes = meta["classes"]
@@ -233,7 +234,7 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
     if feature_encoding == "pca":
         # Only the PCA-of-CNN-features path needs the classical backbone; the "domain" path
         # is a separate, CNN-free classifier (raw image -> hand-designed features -> circuit).
-        ckpt_path = results_dir / "classical_backbone_state.pt"
+        ckpt_path = results_dir / f"classical_backbone_state{output_suffix}.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(
                 f"{ckpt_path} not found. Run classical_baseline.py first (it must save the "
@@ -378,7 +379,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--splits-metadata", default="run_metadata.json",
+                         help="Which data/splits/*.json to read (e.g. run_metadata_groupsafe.json).")
+    parser.add_argument("--output-suffix", default="",
+                         help="Appended to all output filenames AND used to find the matching "
+                              "classical_backbone_state<suffix>.pt (e.g. '_groupsafe') so this "
+                              "reuses the SAME frozen CNN classical_baseline.py trained on that "
+                              "split, and doesn't overwrite a different split's results.")
     args = parser.parse_args()
+    suf = args.output_suffix
 
     script_dir = Path(__file__).resolve().parent
     research_root = script_dir.parent
@@ -391,14 +400,18 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    result = run_hybrid_pipeline(cfg, research_root, device, smoke_test=args.smoke_test)
+    result = run_hybrid_pipeline(
+        cfg, research_root, device, smoke_test=args.smoke_test,
+        splits_metadata=args.splits_metadata, output_suffix=suf,
+    )
 
     results_dir = research_root / cfg["paths"]["results_dir"]
     results_dir.mkdir(parents=True, exist_ok=True)
     preds = result.pop("test_predictions")
-    with open(results_dir / "quantum_metrics.json", "w") as f:
+    metrics_path = results_dir / f"quantum_metrics{suf}.json"
+    with open(metrics_path, "w") as f:
         json.dump(result, f, indent=2)
-    with open(results_dir / "quantum_test_predictions.json", "w") as f:
+    with open(results_dir / f"quantum_test_predictions{suf}.json", "w") as f:
         json.dump(preds, f, indent=2)
 
     print("\n=== Quantum hybrid summary ===")
@@ -408,7 +421,7 @@ def main():
     print(f"Test F1 (macro): {result['test_metrics']['f1_macro']:.4f}")
     if result["cv_fold_metrics"]:
         print(f"CV accuracy: {result['cv_mean_accuracy']:.4f} +/- {result['cv_std_accuracy']:.4f}")
-    print(f"Saved: {results_dir/'quantum_metrics.json'}")
+    print(f"Saved: {metrics_path}")
 
 
 if __name__ == "__main__":

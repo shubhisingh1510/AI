@@ -175,7 +175,13 @@ def main():
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--embed-dim", type=int, default=4)
+    parser.add_argument("--backbone-suffix", default="",
+                         help="Reads classical_backbone_state<suffix>.pt (e.g. '_groupsafe') so "
+                              "this can reuse a corrected split's retrained backbone.")
+    parser.add_argument("--output-suffix", default="",
+                         help="Appended to this script's own output filenames.")
     args = parser.parse_args()
+    suf = args.output_suffix
 
     script_dir = Path(__file__).resolve().parent
     research_root = script_dir.parent
@@ -215,7 +221,7 @@ def main():
     )
     fold_df = group_kfold_splits(df, cfg["data"]["kfold"], seed)
 
-    ckpt_path = results_dir / "classical_backbone_state.pt"
+    ckpt_path = results_dir / f"classical_backbone_state{args.backbone_suffix}.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"{ckpt_path} not found. Run classical_baseline.py first.")
     state = torch.load(ckpt_path, map_location=device)
@@ -280,7 +286,7 @@ def main():
 
     test_metrics = compute_metrics(test_labels, test_preds, test_probs, n_classes)
     plot_confusion_matrix(np.array(test_metrics["confusion_matrix"]), classes,
-                           figures_dir / "multimodal_fusion_confusion_matrix.png")
+                           figures_dir / f"multimodal_fusion_confusion_matrix{suf}.png")
 
     cv_results = []
     if not args.smoke_test:
@@ -330,10 +336,10 @@ def main():
         "history": history,
         "smoke_test": args.smoke_test,
     }
-    metrics_path = results_dir / "multimodal_fusion_metrics.json"
+    metrics_path = results_dir / f"multimodal_fusion_metrics{suf}.json"
     with open(metrics_path, "w") as f:
         json.dump(output, f, indent=2)
-    with open(results_dir / "multimodal_fusion_test_predictions.json", "w") as f:
+    with open(results_dir / f"multimodal_fusion_test_predictions{suf}.json", "w") as f:
         json.dump({
             "filenames": test_files, "y_true": test_labels.tolist(), "y_pred": test_preds.tolist(),
             "y_probs": test_probs.tolist(), "classes": classes,
