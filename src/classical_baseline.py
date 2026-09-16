@@ -51,11 +51,13 @@ def set_seed(seed: int):
 
 
 class WoundImageDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, label_to_idx: dict, transform, base_dir: Path = None):
+    def __init__(self, df: pd.DataFrame, label_to_idx: dict, transform, base_dir: Path = None,
+                 preprocess_fn=None):
         self.df = df.reset_index(drop=True)
         self.label_to_idx = label_to_idx
         self.transform = transform
         self.base_dir = base_dir
+        self.preprocess_fn = preprocess_fn  # e.g. wound_crop.wound_crop; applied before transform
 
     def __len__(self):
         return len(self.df)
@@ -66,6 +68,8 @@ class WoundImageDataset(Dataset):
         if self.base_dir is not None and not fp.is_absolute():
             fp = self.base_dir / fp
         img = Image.open(fp).convert("RGB")
+        if self.preprocess_fn is not None:
+            img = self.preprocess_fn(img)
         img = self.transform(img)
         label = self.label_to_idx[row["label"]]
         # Bare filenames collide across class folders in this dataset (e.g. both
@@ -75,6 +79,15 @@ class WoundImageDataset(Dataset):
         return img, label, image_id
 
 
+def get_preprocess_fn(cfg):
+    """Returns the label-free wound_crop() preprocessing function when
+    data.preprocessing == 'wound_crop', else None (full-frame input, the original behavior)."""
+    if cfg["data"].get("preprocessing", "full_frame") == "wound_crop":
+        from wound_crop import wound_crop
+        return wound_crop
+    return None
+
+
 def build_transforms(cfg):
     mean = cfg["classical"]["imagenet_mean"]
     std = cfg["classical"]["imagenet_std"]
@@ -82,7 +95,16 @@ def build_transforms(cfg):
     cj = cfg["classical"]["color_jitter"]
     augmentation = cfg["classical"].get("augmentation", "standard")
 
-    if augmentation == "heavy":
+    if augmentation == "randaugment":
+        train_tf = transforms.Compose([
+            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(p=0.2),
+            transforms.RandAugment(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+    elif augmentation == "heavy":
         # Matches the augmentation recipe reported in Chowdhury et al., "Eff-ReLU-Net: a deep
         # learning framework for multiclass wound classification" (PMC12220098), the only
         # published result found on this exact AZH 4-class dataset that reaches ~90% accuracy:
@@ -188,7 +210,33 @@ def set_backbone_trainable(model, trainable: bool):
         p.requires_grad = trainable
 
 
-def run_epoch(model, loader, criterion, optimizer, device, train: bool):
+def mixup_cutmix_batch(imgs, labels, alpha, cutmix_prob, device):
+    """Randomly applies MixUp (linear pixel blend) or CutMix (patch swap) to one batch, chosen
+    per-batch with probability cutmix_prob. Returns (imgs, labels_a, labels_b, lam) for a
+    lam-weighted loss: lam*CE(out,labels_a) + (1-lam)*CE(out,labels_b). alpha<=0 disables this
+    and returns the batch unchanged with lam=1.0 (equivalent to plain CE on the true labels)."""
+    if alpha <= 0:
+        return imgs, labels, labels, 1.0
+    lam = float(np.random.beta(alpha, alpha))
+    perm = torch.randperm(imgs.size(0), device=device)
+    labels_b = labels[perm]
+
+    if np.random.rand() < cutmix_prob:
+        h, w = imgs.shape[2], imgs.shape[3]
+        cut_rat = np.sqrt(1.0 - lam)
+        cut_h, cut_w = int(h * cut_rat), int(w * cut_rat)
+        cy, cx = np.random.randint(h), np.random.randint(w)
+        y1, y2 = int(np.clip(cy - cut_h // 2, 0, h)), int(np.clip(cy + cut_h // 2, 0, h))
+        x1, x2 = int(np.clip(cx - cut_w // 2, 0, w)), int(np.clip(cx + cut_w // 2, 0, w))
+        imgs[:, :, y1:y2, x1:x2] = imgs[perm][:, :, y1:y2, x1:x2]
+        lam = 1.0 - ((x2 - x1) * (y2 - y1) / (w * h))
+    else:
+        imgs = lam * imgs + (1 - lam) * imgs[perm]
+
+    return imgs, labels, labels_b, lam
+
+
+def run_epoch(model, loader, criterion, optimizer, device, train: bool, mixup_cfg=None):
     model.train() if train else model.eval()
     total_loss, n_correct, n_total = 0.0, 0, 0
     with torch.set_grad_enabled(train):
@@ -196,14 +244,24 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
             imgs, labels = imgs.to(device), labels.to(device)
             if train:
                 optimizer.zero_grad()
+            labels_a, labels_b, lam = labels, labels, 1.0
+            if train and mixup_cfg and mixup_cfg.get("enabled", False):
+                imgs, labels_a, labels_b, lam = mixup_cutmix_batch(
+                    imgs, labels, mixup_cfg.get("alpha", 0.2), mixup_cfg.get("cutmix_prob", 0.5), device,
+                )
             outputs = model(imgs)
-            loss = criterion(outputs, labels)
+            if lam != 1.0:
+                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+            else:
+                loss = criterion(outputs, labels_a)
             if train:
                 loss.backward()
                 optimizer.step()
             total_loss += loss.item() * imgs.size(0)
             preds = outputs.argmax(dim=1)
-            n_correct += (preds == labels).sum().item()
+            # Under mixup/cutmix, "correct" is measured against the dominant (lam-weighted)
+            # label as an approximation -- accuracy isn't strictly well-defined for soft targets.
+            n_correct += (preds == labels_a).sum().item()
             n_total += imgs.size(0)
     return total_loss / n_total, n_correct / n_total
 
@@ -303,7 +361,8 @@ def train_classical(model, train_loader, val_loader, cfg, device):
             unfrozen = True
             optimizer = make_optimizer(model.parameters(), ccfg, ccfg["lr_finetune"])
 
-        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, True)
+        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, True,
+                                           mixup_cfg=ccfg.get("mixup_cutmix"))
         val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, device, False)
 
         history["train_loss"].append(train_loss)
@@ -358,6 +417,46 @@ def extract_features_and_predict(model, loader, device):
         np.concatenate(all_labels),
         all_files,
     )
+
+
+def build_tta_transforms(cfg):
+    """8 deterministic views (identity + 3 rotations, each with/without a horizontal flip) built
+    from the same eval-time resize/crop/normalize as build_transforms()'s eval_tf, so TTA differs
+    from plain evaluation only in which augmented views are averaged, not in base preprocessing."""
+    mean = cfg["classical"]["imagenet_mean"]
+    std = cfg["classical"]["imagenet_std"]
+    size = cfg["data"]["image_size"]
+    views = []
+    for flip_h in (False, True):
+        for angle in (0, 90, 180, 270):
+            ops = [transforms.Resize(int(size * 1.14)), transforms.CenterCrop(size)]
+            if flip_h:
+                ops.append(transforms.Lambda(lambda img: transforms.functional.hflip(img)))
+            if angle != 0:
+                ops.append(transforms.Lambda(lambda img, a=angle: transforms.functional.rotate(img, a)))
+            ops += [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
+            views.append(transforms.Compose(ops))
+    return views
+
+
+@torch.no_grad()
+def predict_with_tta(model, df, label_to_idx, base_dir, cfg, device, preprocess_fn=None):
+    """Averages softmax probabilities over build_tta_transforms()'s views. Returns
+    (probs, preds, labels, files), matching extract_features_and_predict's prediction outputs
+    (features are not meaningful to average across views, so they're not returned)."""
+    views = build_tta_transforms(cfg)
+    avg_probs, labels, files = None, None, None
+    for view_tf in views:
+        loader = DataLoader(
+            WoundImageDataset(df, label_to_idx, view_tf, base_dir, preprocess_fn),
+            batch_size=cfg["classical"]["batch_size"], shuffle=False, num_workers=0,
+        )
+        _, probs, _, view_labels, view_files = extract_features_and_predict(model, loader, device)
+        avg_probs = probs if avg_probs is None else avg_probs + probs
+        labels, files = view_labels, view_files
+    avg_probs = avg_probs / len(views)
+    preds = avg_probs.argmax(axis=1)
+    return avg_probs, preds, labels, files
 
 
 def compute_metrics(y_true, y_pred, y_probs, n_classes):
@@ -441,6 +540,10 @@ def main():
     parser.add_argument("--output-suffix", default="",
                          help="Appended to all output filenames (e.g. '_groupsafe') so a rerun on "
                               "a different split does not overwrite the original results.")
+    parser.add_argument("--tta", action="store_true",
+                         help="Also evaluate the main test split with test-time augmentation "
+                              "(8-view average). Reported as a separate 'test_metrics_tta' field "
+                              "alongside the plain 'test_metrics', not in place of it.")
     args = parser.parse_args()
     suf = args.output_suffix
 
@@ -492,16 +595,17 @@ def main():
         cfg["classical"]["early_stopping_patience"] = 1
 
     ccfg = cfg["classical"]
+    preprocess_fn = get_preprocess_fn(cfg)
     train_loader = DataLoader(
-        WoundImageDataset(train_df, label_to_idx, train_tf, research_root),
+        WoundImageDataset(train_df, label_to_idx, train_tf, research_root, preprocess_fn),
         batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
     )
     val_loader = DataLoader(
-        WoundImageDataset(val_df, label_to_idx, eval_tf, research_root),
+        WoundImageDataset(val_df, label_to_idx, eval_tf, research_root, preprocess_fn),
         batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
     )
     test_loader = DataLoader(
-        WoundImageDataset(test_df, label_to_idx, eval_tf, research_root),
+        WoundImageDataset(test_df, label_to_idx, eval_tf, research_root, preprocess_fn),
         batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
     )
 
@@ -525,6 +629,16 @@ def main():
     plot_confusion_matrix(np.array(test_metrics["confusion_matrix"]), classes,
                            figures_dir / f"classical_confusion_matrix{suf}.png")
 
+    test_metrics_tta = None
+    if args.tta:
+        tta_probs, tta_preds, tta_labels, _ = predict_with_tta(
+            model, test_df, label_to_idx, research_root, cfg, device, preprocess_fn,
+        )
+        test_metrics_tta = compute_metrics(tta_labels, tta_preds, tta_probs, n_classes)
+        print(f"[TTA] Test accuracy (8-view average): {test_metrics_tta['accuracy']:.4f} "
+              f"(non-TTA: {test_metrics['accuracy']:.4f}, delta="
+              f"{test_metrics_tta['accuracy'] - test_metrics['accuracy']:+.4f})")
+
     np.save(results_dir / f"classical_features{suf}.npy", feats)
     torch.save(model.state_dict(), results_dir / f"classical_backbone_state{suf}.pt")
     with open(results_dir / f"classical_test_predictions{suf}.json", "w") as f:
@@ -545,11 +659,11 @@ def main():
             fold_train_df = fold_df[fold_df["fold"] != fold]
             fold_test_df = fold_df[fold_df["fold"] == fold]
             fold_train_loader = DataLoader(
-                WoundImageDataset(fold_train_df, label_to_idx, train_tf, research_root),
+                WoundImageDataset(fold_train_df, label_to_idx, train_tf, research_root, preprocess_fn),
                 batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
             )
             fold_test_loader = DataLoader(
-                WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root),
+                WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root, preprocess_fn),
                 batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
             )
             fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0)).to(device)
@@ -573,6 +687,7 @@ def main():
         "inference_time_s_total_test": inference_time_s,
         "inference_time_ms_per_image": inference_time_per_image_ms,
         "test_metrics": test_metrics,
+        "test_metrics_tta": test_metrics_tta,
         "cv_fold_metrics": cv_results,
         "cv_mean_accuracy": float(np.mean([r["accuracy"] for r in cv_results])) if cv_results else None,
         "cv_std_accuracy": float(np.std([r["accuracy"] for r in cv_results])) if cv_results else None,

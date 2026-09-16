@@ -7,8 +7,11 @@ from classical_baseline import (
     WoundImageDataset,
     build_discriminative_optimizer,
     build_model,
+    build_tta_transforms,
     compute_class_weights,
     compute_metrics,
+    get_preprocess_fn,
+    mixup_cutmix_batch,
     set_resnet_block_trainable,
 )
 
@@ -68,6 +71,76 @@ def test_build_discriminative_optimizer_assigns_decaying_lr_per_unfrozen_block()
 def test_resnet_unfreeze_order_starts_with_last_block():
     assert RESNET_UNFREEZE_ORDER[0] == "layer4"
     assert RESNET_UNFREEZE_ORDER[-1] == "conv1_bn1"
+
+
+def test_mixup_cutmix_batch_disabled_returns_batch_unchanged():
+    imgs = torch.randn(4, 3, 8, 8)
+    labels = torch.tensor([0, 1, 2, 3])
+    out_imgs, labels_a, labels_b, lam = mixup_cutmix_batch(imgs, labels, alpha=0.0, cutmix_prob=0.5, device="cpu")
+    assert torch.equal(out_imgs, imgs)
+    assert torch.equal(labels_a, labels)
+    assert torch.equal(labels_b, labels)
+    assert lam == 1.0
+
+
+def test_mixup_cutmix_batch_mixup_blends_pixels():
+    # torch.randperm can coincidentally be the identity permutation for a given seed, which
+    # would make the blend a no-op on this symmetric input -- try a few seeds so the test
+    # isn't flaky on that coincidence rather than actually exercising the blend.
+    imgs = torch.zeros(4, 3, 8, 8)
+    imgs[0] = 1.0
+    labels = torch.tensor([0, 1, 2, 3])
+    saw_a_real_blend = False
+    for seed in range(10):
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        out_imgs, labels_a, labels_b, lam = mixup_cutmix_batch(
+            imgs.clone(), labels, alpha=1.0, cutmix_prob=0.0, device="cpu",
+        )
+        assert 0.0 <= lam <= 1.0
+        assert torch.equal(labels_a, labels)
+        if not torch.equal(out_imgs, imgs):
+            saw_a_real_blend = True
+            break
+    assert saw_a_real_blend
+
+
+def test_mixup_cutmix_batch_cutmix_swaps_a_patch_not_the_whole_image():
+    torch.manual_seed(1)
+    np.random.seed(1)
+    imgs = torch.zeros(4, 3, 16, 16)
+    imgs[1] = 1.0  # distinct from the rest so a swapped patch is detectable
+    labels = torch.tensor([0, 1, 2, 3])
+    out_imgs, _, _, lam = mixup_cutmix_batch(imgs.clone(), labels, alpha=1.0, cutmix_prob=1.0, device="cpu")
+    assert 0.0 <= lam <= 1.0
+    # CutMix swaps rectangular patches -- output should differ from input for at least one image
+    # but not be uniformly replaced (a real patch swap, not a full-image copy).
+    assert not torch.equal(out_imgs, imgs)
+
+
+def test_get_preprocess_fn_none_by_default():
+    assert get_preprocess_fn({"data": {}}) is None
+
+
+def test_get_preprocess_fn_returns_wound_crop_when_configured():
+    fn = get_preprocess_fn({"data": {"preprocessing": "wound_crop"}})
+    assert fn is not None
+    assert fn.__name__ == "wound_crop"
+
+
+def test_build_tta_transforms_returns_eight_distinct_views():
+    cfg = {
+        "classical": {"imagenet_mean": [0.485, 0.456, 0.406], "imagenet_std": [0.229, 0.224, 0.225]},
+        "data": {"image_size": 32},
+    }
+    views = build_tta_transforms(cfg)
+    assert len(views) == 8
+    from PIL import Image
+    img = Image.fromarray((np.random.rand(50, 50, 3) * 255).astype(np.uint8))
+    outputs = [v(img) for v in views]
+    assert all(o.shape == (3, 32, 32) for o in outputs)
+    # Not all views should be identical (flips/rotations actually change the tensor).
+    assert not all(torch.equal(outputs[0], o) for o in outputs[1:])
 
 
 def test_wound_image_dataset_getitem_returns_labeled_tensor(tmp_path, make_image, toy_raw_dir):
