@@ -51,25 +51,41 @@ commit (`6d4d0f3`).
 
 ## Current best model (numbers that are actually final, i.e. computed and persisted)
 
-These are from the **previous 730-image dataset** (`results/classical_metrics.json`,
-`results/quantum_metrics.json`, `results/statistical_tests.json`, all dated Sep 7-9). They are
-real, reproducible numbers, but they are **not** the current dataset's numbers.
+**UPDATED 2026-09-20**: These are now on the **current 891-image dataset**, using a corrected
+**group-safe** split (`results/*_groupsafe.json`, `run_metadata_groupsafe.json`) that fixes a real
+data-leakage bug in the previous split (near-duplicate images appearing in both train and test —
+see Limitations item 5, below, which this fixes rather than merely flags). The 730-image numbers
+that used to be here are superseded; do not cite them as current.
 
 | Model | Test acc | Test macro-F1 | Test ROC-AUC (macro OvR) | CV mean acc | CV std |
 |---|---|---|---|---|---|
-| Classical ResNet-50 | 74.1% | 0.731 | 0.919 | 74.6% | ±1.7% |
-| Quantum-hybrid (PCA encoding, 6 qubits, depth 3) | 69.8% | 0.689 | 0.868 | **81.3%** | ±3.9% |
+| Classical ResNet-50 (full fine-tune) | 72.9% | 0.731 | 0.905 | 75.2% | ±2.7% |
+| Frozen backbone + matched classical head (81 params) | 69.0% | 0.692 | 0.878 | **79.5%** | ±4.7% |
+| Quantum-hybrid (PCA, 6 qubits, depth 3, 82 params) | 64.3% | 0.650 | 0.834 | 75.9% | ±2.1% |
 
-- Paired t-test on the 5 CV folds: quantum-hybrid significantly higher mean accuracy than
-  classical (mean diff +6.7pp, t=3.15, **p=0.0345**, significant at 0.05).
-- McNemar's test on the single held-out test split: **not significant** (p=0.332) -- the two
-  models' test-set error patterns aren't distinguishable on that one split. The CV-based claim is
-  the more defensible one; the single-split test-accuracy numbers should not be over-interpreted.
-- Quantum-hybrid model: 82 trainable parameters vs classical's 23.5M, and trains ~13x faster --
-  a real efficiency finding independent of the accuracy comparison.
+- **The previously reported quantum advantage does not replicate.** On the old (leaky) split,
+  quantum-hybrid's CV accuracy was significantly higher than classical's (p=0.0345). On this
+  corrected split: naive paired t-test p=0.296, Nadeau-Bengio corrected resampled t-test p=0.468 —
+  **not significant either way**. McNemar's on the held-out test set is now significant
+  (p=0.027) **in classical's favor** — the opposite direction from before.
+- A new **matched-capacity classical control** (same frozen features as quantum-hybrid, but a
+  classical 81-param MLP head instead of a quantum circuit) was added to separate "frozen features
+  generalize better" from "the quantum circuit helps." It is not significantly different from
+  quantum on any test (p=0.069–0.263) but is numerically higher on every metric.
+- **Data re-uploading** (re-injecting inputs at every entangling layer, a standard way to increase
+  a QNN's effective capacity) was tried as a direct attempt to close the gap. It made things
+  substantially worse (50.4% test / 62.3%±5.3% CV, down from 64.3%/75.9%) — a genuine negative
+  result, not discarded.
+- Quantum-hybrid model: 82 trainable parameters vs classical's 23.5M, and infers ~13x faster --
+  still a real, standing efficiency finding, independent of the (now null) accuracy comparison.
 - Domain-feature encoding (6 hand-designed clinical features, no CNN) was tried and abandoned as
   the default: it only reached ~31-37% test accuracy, barely above the 25% random baseline for 4
-  classes (`results/ablation_results.csv`). Config default is `feature_encoding: pca`.
+  classes (`results/ablation_results.csv`, from the prior 730-image dataset — not yet rerun
+  group-safe). Config default is `feature_encoding: pca`.
+- **No path currently in evidence reaches 90%+ accuracy.** Best number is 79.5% CV (the matched
+  classical control). Both directions tried to increase the quantum model's capacity (ablation
+  grid, on the old dataset; data re-uploading, on the current one) failed to help or actively
+  hurt — the bottleneck looks like dataset size/quality, not circuit or model capacity.
 
 ## Current limitations
 
@@ -152,15 +168,20 @@ existing runs.
 
 ## Recommended next experiment
 
-The Mendeley v2 lead (previously item 1 here) was checked this session and ruled out -- see
-Limitations item 6. No new legitimately-licensed arterial-ulcer source was found; the standing
-4-class scope limitation stands. In priority order, cheapest/highest-value first:
+**UPDATE 2026-09-20**: Items 1-2 below (as of the last status doc) are now DONE -- see "Current
+best model" above for the group-safe classical/quantum/matched-control results and the
+statistical comparison. The Mendeley v2 lead was checked and ruled out (Limitations item 6); no
+new legitimately-licensed arterial-ulcer source was found, so the 4-class scope limitation stands.
+Remaining, in priority order:
 
-1. **Restart the classical 5-fold CV on the 891-image dataset**, this time as a long-running
-   background process the user's machine can stay awake for (or via the Colab notebook, which
-   needs a live, authenticated Colab session -- something only the user can reliably drive, or
-   that would need explicit sign-off to attempt via browser automation given it consumes shared
-   free-tier GPU quota).
-2. Only after (1) finishes: rerun `src/quantum_hybrid.py` and `src/evaluate_compare.py` on the
-   891-image features, then rebuild `paper/report.html`.
-4. Investigate the 35 cross-class near-duplicate pairs before trusting the retrained numbers.
+1. **Individually review the 35 cross-class near-duplicate pairs** on the current 891-image set
+   (handled structurally by the group-safe split, not yet reviewed for content/labeling).
+2. Rerun the qubit×depth ablation grid (`src/ablation.py`) and Grad-CAM explainability
+   (`src/explainability.py`, now supports `--input-suffix`/`--splits-metadata`) on the group-safe
+   split -- both are currently reported from the prior (pre-correction) dataset in
+   `paper/report.html`, labeled as such.
+3. If pursuing higher accuracy: more/better data (ideally closing the arterial-class gap) is the
+   most defensible next lever. Two different attempts to increase the quantum model's effective
+   capacity (the old ablation grid; data re-uploading, tried this session) did not help --
+   further circuit or hyperparameter tuning on the current dataset is not expected to close the
+   gap to 90%+.
