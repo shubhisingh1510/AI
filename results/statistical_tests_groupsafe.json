@@ -1,0 +1,137 @@
+{
+  "classical_vs_frozen_head": {
+    "naive_paired_ttest_cv": {
+      "test": "naive_paired_t_test_on_cv_fold_accuracy",
+      "n_folds": 5,
+      "fold_accuracies_a": [
+        0.7382198952879581,
+        0.7719298245614035,
+        0.7771428571428571,
+        0.7679558011049724,
+        0.7052023121387283
+      ],
+      "fold_accuracies_b": [
+        0.7696335078534031,
+        0.847953216374269,
+        0.8171428571428572,
+        0.8232044198895028,
+        0.7167630057803468
+      ],
+      "mean_diff_b_minus_a": 0.04284926336089179,
+      "t_statistic": 3.9344928949966063,
+      "p_value": 0.017038484314270273,
+      "significant_at_0.05": true
+    },
+    "corrected_resampled_paired_ttest_cv": {
+      "test": "corrected_resampled_paired_t_test",
+      "citation": "Nadeau & Bengio (2003), correcting the variance underestimate in naive paired t-tests on k-fold CV identified by Dietterich (1998).",
+      "n_folds": 5,
+      "n_total_images": 891,
+      "mean_train_size_per_fold": 712.8,
+      "mean_test_size_per_fold": 178.2,
+      "mean_diff_b_minus_a": 0.0428492633608919,
+      "t_statistic": 2.6229952633310707,
+      "degrees_of_freedom": 4,
+      "p_value": 0.05861493912328475,
+      "significant_at_0.05": false
+    },
+    "mcnemar_test": {
+      "test": "mcnemar_exact_binomial",
+      "n01_a_wrong_b_right": 5,
+      "n10_a_right_b_wrong": 10,
+      "n_discordant": 15,
+      "p_value": 0.30175781249999994,
+      "significant_at_0.05": false
+    }
+  },
+  "classical_vs_quantum": {
+    "naive_paired_ttest_cv": {
+      "test": "naive_paired_t_test_on_cv_fold_accuracy",
+      "n_folds": 5,
+      "fold_accuracies_a": [
+        0.7382198952879581,
+        0.7719298245614035,
+        0.7771428571428571,
+        0.7679558011049724,
+        0.7052023121387283
+      ],
+      "fold_accuracies_b": [
+        0.7329842931937173,
+        0.7777777777777778,
+        0.7771428571428571,
+        0.7734806629834254,
+        0.7341040462427746
+      ],
+      "mean_diff_b_minus_a": 0.007007789420926391,
+      "t_statistic": 1.200151465945911,
+      "p_value": 0.296298731873935,
+      "significant_at_0.05": false
+    },
+    "corrected_resampled_paired_ttest_cv": {
+      "test": "corrected_resampled_paired_t_test",
+      "citation": "Nadeau & Bengio (2003), correcting the variance underestimate in naive paired t-tests on k-fold CV identified by Dietterich (1998).",
+      "n_folds": 5,
+      "n_total_images": 891,
+      "mean_train_size_per_fold": 712.8,
+      "mean_test_size_per_fold": 178.2,
+      "mean_diff_b_minus_a": 0.007007789420926569,
+      "t_statistic": 0.8001009772972739,
+      "degrees_of_freedom": 4,
+      "p_value": 0.46847488137107407,
+      "significant_at_0.05": false
+    },
+    "mcnemar_test": {
+      "test": "mcnemar_exact_binomial",
+      "n01_a_wrong_b_right": 5,
+      "n10_a_right_b_wrong": 16,
+      "n_discordant": 21,
+      "p_value": 0.02660369873046875,
+      "significant_at_0.05": true
+    }
+  },
+  "frozen_head_vs_quantum": {
+    "naive_paired_ttest_cv": {
+      "test": "naive_paired_t_test_on_cv_fold_accuracy",
+      "n_folds": 5,
+      "fold_accuracies_a": [
+        0.7696335078534031,
+        0.847953216374269,
+        0.8171428571428572,
+        0.8232044198895028,
+        0.7167630057803468
+      ],
+      "fold_accuracies_b": [
+        0.7329842931937173,
+        0.7777777777777778,
+        0.7771428571428571,
+        0.7734806629834254,
+        0.7341040462427746
+      ],
+      "mean_diff_b_minus_a": -0.035841473939965396,
+      "t_statistic": -2.4680533628295023,
+      "p_value": 0.06909100443910789,
+      "significant_at_0.05": false
+    },
+    "corrected_resampled_paired_ttest_cv": {
+      "test": "corrected_resampled_paired_t_test",
+      "citation": "Nadeau & Bengio (2003), correcting the variance underestimate in naive paired t-tests on k-fold CV identified by Dietterich (1998).",
+      "n_folds": 5,
+      "n_total_images": 891,
+      "mean_train_size_per_fold": 712.8,
+      "mean_test_size_per_fold": 178.2,
+      "mean_diff_b_minus_a": -0.035841473939965326,
+      "t_statistic": -1.6453689085530014,
+      "degrees_of_freedom": 4,
+      "p_value": 0.1752390574653063,
+      "significant_at_0.05": false
+    },
+    "mcnemar_test": {
+      "test": "mcnemar_exact_binomial",
+      "n01_a_wrong_b_right": 7,
+      "n10_a_right_b_wrong": 13,
+      "n_discordant": 20,
+      "p_value": 0.26317596435546875,
+      "significant_at_0.05": false
+    }
+  }
+}

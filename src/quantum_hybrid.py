@@ -187,7 +187,7 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg, d
 
 def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_depth=None,
                          feature_encoding=None, smoke_test=False, data_reuploading=None,
-                         splits_metadata="run_metadata.json", output_suffix=""):
+                         splits_metadata="run_metadata.json", output_suffix="", backbone_suffix=None):
     """
     Full pipeline: load classical checkpoint's features (or recompute from a fresh classical
     checkpoint), PCA-fit on train, train hybrid head, evaluate on test + CV folds.
@@ -234,7 +234,8 @@ def run_hybrid_pipeline(cfg, research_root, device, num_qubits=None, circuit_dep
     if feature_encoding == "pca":
         # Only the PCA-of-CNN-features path needs the classical backbone; the "domain" path
         # is a separate, CNN-free classifier (raw image -> hand-designed features -> circuit).
-        ckpt_path = results_dir / f"classical_backbone_state{output_suffix}.pt"
+        bsuf = backbone_suffix if backbone_suffix is not None else output_suffix
+        ckpt_path = results_dir / f"classical_backbone_state{bsuf}.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(
                 f"{ckpt_path} not found. Run classical_baseline.py first (it must save the "
@@ -382,10 +383,16 @@ def main():
     parser.add_argument("--splits-metadata", default="run_metadata.json",
                          help="Which data/splits/*.json to read (e.g. run_metadata_groupsafe.json).")
     parser.add_argument("--output-suffix", default="",
-                         help="Appended to all output filenames AND used to find the matching "
-                              "classical_backbone_state<suffix>.pt (e.g. '_groupsafe') so this "
-                              "reuses the SAME frozen CNN classical_baseline.py trained on that "
-                              "split, and doesn't overwrite a different split's results.")
+                         help="Appended to all output filenames AND (unless --backbone-suffix is "
+                              "given) used to find the matching classical_backbone_state<suffix>.pt "
+                              "(e.g. '_groupsafe') so this reuses the SAME frozen CNN "
+                              "classical_baseline.py trained on that split, and doesn't overwrite "
+                              "a different split's results.")
+    parser.add_argument("--backbone-suffix", default=None,
+                         help="Suffix to find classical_backbone_state<suffix>.pt, if different "
+                              "from --output-suffix (e.g. running a reuploading=True variant as "
+                              "'_groupsafe_reupload' while reusing the '_groupsafe' backbone). "
+                              "Defaults to --output-suffix.")
     args = parser.parse_args()
     suf = args.output_suffix
 
@@ -403,6 +410,7 @@ def main():
     result = run_hybrid_pipeline(
         cfg, research_root, device, smoke_test=args.smoke_test,
         splits_metadata=args.splits_metadata, output_suffix=suf,
+        backbone_suffix=args.backbone_suffix,
     )
 
     results_dir = research_root / cfg["paths"]["results_dir"]
