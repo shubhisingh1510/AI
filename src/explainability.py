@@ -80,6 +80,14 @@ def main():
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--n-correct", type=int, default=3)
     parser.add_argument("--n-incorrect", type=int, default=3)
+    parser.add_argument("--input-suffix", default="",
+                         help="Matches --output-suffix used by classical_baseline.py (e.g. "
+                              "'_groupsafe'), so this renders Grad-CAM for that model's "
+                              "checkpoint/predictions instead of the unsuffixed default.")
+    parser.add_argument("--splits-metadata", default="run_metadata.json",
+                         help="Which data/splits/*.json to read for image filepaths (e.g. "
+                              "run_metadata_groupsafe.json) -- must match the split the "
+                              "checkpoint above was trained on.")
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
@@ -94,14 +102,15 @@ def main():
 
     results_dir = research_root / cfg["paths"]["results_dir"]
     figures_dir = research_root / cfg["paths"]["figures_dir"]
-    out_dir = figures_dir / "gradcam_examples"
+    suf = args.input_suffix
+    out_dir = figures_dir / f"gradcam_examples{suf}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pred_path = results_dir / "classical_test_predictions.json"
-    ckpt_path = results_dir / "classical_backbone_state.pt"
+    pred_path = results_dir / f"classical_test_predictions{suf}.json"
+    ckpt_path = results_dir / f"classical_backbone_state{suf}.pt"
     if not pred_path.exists() or not ckpt_path.exists():
-        print("Missing classical_test_predictions.json or classical_backbone_state.pt. "
-              "Run classical_baseline.py first.")
+        print(f"Missing {pred_path.name} or {ckpt_path.name}. Run classical_baseline.py first "
+              f"(with --output-suffix {suf!r} if that's what you passed here).")
         return
 
     with open(pred_path) as f:
@@ -125,7 +134,7 @@ def main():
     incorrect_idx = np.where(y_true != y_pred)[0]
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
-    with open(splits_dir / "run_metadata.json") as f:
+    with open(splits_dir / args.splits_metadata) as f:
         meta = json.load(f)
     split_df = pd.read_csv(splits_dir / meta["train_val_test_split_file"])
     # Bare filenames collide across class folders in this dataset (e.g. both
