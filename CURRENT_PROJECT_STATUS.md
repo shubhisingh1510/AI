@@ -52,9 +52,18 @@ commit (`6d4d0f3`).
 ## Current best model (numbers that are actually final, i.e. computed and persisted)
 
 **UPDATED 2026-09-20**: These are now on the **current 891-image dataset**, using a corrected
-**group-safe** split (`results/*_groupsafe.json`, `run_metadata_groupsafe.json`) that fixes a real
-data-leakage bug in the previous split (near-duplicate images appearing in both train and test —
-see Limitations item 5, below, which this fixes rather than merely flags). The 730-image numbers
+**group-safe** split (`results/*_groupsafe.json`, `run_metadata_groupsafe.json`) that fixes a
+**verified split-key bug**: the fallback pseudo-patient-ID keyed on bare filename, which collides
+across class folders in this dataset (e.g. `test_100_0.jpg` exists under both `diabetic/` and
+`pressure/`), silently forcing 191 of 559 fallback groups to span more than one true class label.
+This is a confirmed code bug (see `git show ce504d9 -- src/data_prep.py`), not an inference. The
+same fix also groups visually near-duplicate images (Limitations item 5) as a separate,
+conservative addition — **correction to an earlier version of this doc**: a manual spot-check of
+2 of the 35 flagged near-duplicate pairs found both to be visually distinct wounds, so that
+grouping is *not* claimed as the cause of the changed numbers below; the filename-collision bug
+is. Re-running the significance test on the *unchanged* old 730-image results with the corrected
+resampled t-test (added this session) independently turns the old p=0.0345 into p=0.104 (not
+significant) — a second, separate reason the original claim didn't hold up. The 730-image numbers
 that used to be here are superseded; do not cite them as current.
 
 | Model | Test acc | Test macro-F1 | Test ROC-AUC (macro OvR) | CV mean acc | CV std |
@@ -88,6 +97,10 @@ that used to be here are superseded; do not cite them as current.
   test / 83.0% ± 3.0% CV — the best result in the whole study**, but scoped to only the 730 AZH
   images with real location labels (the 161-image Medetec supplement has none), so it's reported
   side-by-side with the 891-image numbers, not swapped in as a replacement. 792 params.
+  (3) Soft-voting ensemble of classical+frozen_head+quantum (`scripts/eval_ensemble.py`): 71.3%,
+  *worse* than classical alone (72.9%) since quantum's weaker predictions drag the average down;
+  classical+frozen_head only ties classical's accuracy with marginally lower ROC-AUC. Reported as
+  a negative/neutral result, not adopted.
 - **Still no path in evidence reaches 90%+ on the full 891-image set.** But the fusion result is a
   real, actionable diagnostic: two attempts to extract more from the quantum circuit specifically
   (ablation grid, re-uploading) failed, while adding a genuinely new information source (location)

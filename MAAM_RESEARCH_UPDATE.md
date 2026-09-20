@@ -7,20 +7,40 @@ regenerate from `paper/report.html` if the PDF hasn't been re-exported since thi
 
 ## Status in one line
 
-A data-leakage bug in the train/test split was found and fixed, and every model was rerun on the
-corrected split. The previously reported "quantum-hybrid significantly beats classical" result
-does **not** replicate on the corrected data — reported here plainly, not reframed.
+A verified split-key bug was found and fixed, and the significance test itself was found to be
+too generous — both independently undermine the previously reported "quantum-hybrid significantly
+beats classical" result, which does **not** replicate. Reported here plainly, not reframed.
 
-## What changed, and why
+## What changed, and why — two independent reasons, not one
 
-The original split was a stratified image-level split that did not account for near-duplicate
-images appearing in both train and test. A dataset audit had already flagged 33–35 such
-cross-class near-duplicate pairs but a prior version of this project treated them as "likely false
-positives" and left them in place. A corrected, **group-safe** split (`src/dedupe_and_group_split.py`)
-keeps every near-duplicate group on one side of the split. Rerunning on this corrected split
-changed the headline comparison — direct evidence the leakage was real, not a false positive.
+**1. The statistical test was too generous, even with no data changes at all.** Re-running the
+significance test on the *original, unchanged* 730-image CV results with a corrected resampled
+t-test (Nadeau & Bengio 2003, which fixes a known bias in the naive paired t-test on overlapping
+CV folds — Dietterich 1998) turns the originally reported p=0.0345 into **p=0.104 (not
+significant)**. This alone means the original claim didn't hold up, before touching the split.
 
-A second fix: the original quantum-vs-classical comparison had a confound. The classical baseline
+**2. A real, verified bug in the split code was also found and fixed.** `data_prep.py`'s fallback
+pseudo-patient-ID (used because this dataset ships no real patient-ID file) keyed on bare
+filename, which collides across class folders here (e.g. `test_100_0.jpg` exists under both
+`diabetic/` and `pressure/`). This silently forced 191 of 559 fallback groups in the
+previously-published split to span more than one true class label — a confirmed code bug, not an
+inference. Fixed by keying on `"label/filename"` instead; changed 406 of 891 images' split
+assignment.
+
+A related, separate change was bundled into the same fix: the new `src/dedupe_and_group_split.py`
+also groups visually near-duplicate images (35 cross-class hash matches flagged by the dataset
+audit) so they can't be split across train/test. **Important correction to an earlier version of
+this update:** I initially attributed the changed result to this near-duplicate grouping being
+"real leakage." A manual spot-check this session (viewing 2 of the 35 flagged pairs directly, not
+just their hash distance) found both to be visually distinct wounds — different anatomy, framing,
+appearance — consistent with a prior assessment that these are mostly false positives of a coarse
+image hash, not evidence of leakage. The filename-collision bug above (point 2) is the
+well-evidenced explanation for the changed numbers; the near-duplicate grouping is a reasonable
+conservative safeguard but I should not have credited it with causing the change on the strength
+of the result alone. Correcting this now rather than let a plausible-but-unverified explanation
+stand.
+
+A third, independent fix: the original quantum-vs-classical comparison had a confound. The classical baseline
 fully fine-tunes ResNet-50 (23.5M params); quantum-hybrid only trains a tiny head on a *frozen*
 backbone (82 params). Any accuracy gap could be "frozen features generalize better on a small
 dataset," not anything about the quantum circuit. Added a **matched-capacity classical control**
@@ -47,7 +67,8 @@ dataset," not anything about the quantum circuit. Added a **matched-capacity cla
 
 **Bottom line:** there is no statistically robust evidence that the quantum circuit outperforms a
 classical model of any kind on this dataset. The most defensible explanation for the earlier
-positive result is the split leakage described above, not a real quantum effect. Quantum-hybrid's
+positive result is the combination of the too-generous naive significance test and the
+filename-collision split bug described above, not a real quantum effect. Quantum-hybrid's
 real, still-standing advantages are efficiency (82 vs. 23.5M params, 7.4ms vs. 97.1ms inference)
 and the lowest CV variance of the three models — not accuracy.
 

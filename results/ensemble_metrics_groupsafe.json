@@ -1,0 +1,39 @@
+{
+  "models": [
+    "classical",
+    "frozen_head"
+  ],
+  "test_metrics": {
+    "accuracy": 0.7286821705426356,
+    "precision_macro": 0.7364372077786712,
+    "recall_macro": 0.7367938434114905,
+    "f1_macro": 0.7295910388146224,
+    "confusion_matrix": [
+      [
+        22,
+        4,
+        3,
+        5
+      ],
+      [
+        6,
+        21,
+        3,
+        6
+      ],
+      [
+        4,
+        1,
+        21,
+        0
+      ],
+      [
+        3,
+        0,
+        0,
+        30
+      ]
+    ],
+    "roc_auc_ovr_macro": 0.8975325332645024
+  }
+}

@@ -357,12 +357,17 @@ footer{
   <li><strong>35 cross-class near-duplicate hash matches on the current 891-image set</strong>
     &mdash; an earlier version of this report treated the equivalent finding on the 730-image set
     (33 pairs) as "likely false positives... given wound photos share similar framing and skin
-    tone" and left them in both train and test splits. That assumption was not verified before
-    being acted on. Fixing the split to be group-safe (keeping matched/near-duplicate images
-    together, never split across train and test) changed the headline classical-vs-quantum
-    result (&sect;7) &mdash; direct evidence that this leakage was real, not a false positive.
-    The 35 pairs on the current set have not yet been individually reviewed by content (only
-    handled structurally, by keeping each duplicate group on one side of the split).</li>
+    tone" and left them in both train and test splits, without actually looking at any of the
+    flagged images. A small manual spot-check this session (viewing 2 of the 35 pairs directly,
+    not just their hash distance) found both to be visually distinct wounds &mdash; different
+    anatomical location, wound appearance, and framing &mdash; consistent with the original
+    "likely false positives" assessment, not against it. <strong>The headline result change in
+    &sect;7 is attributed to a separate, independently verified bug</strong> (a filename-collision
+    bug in the fallback split key, &sect;4/&sect;7) and to the naive significance test's known
+    bias, not to this near-duplicate grouping. Keeping near-duplicate groups together in the
+    group-safe split remains a reasonable conservative default, but it should not be read as
+    confirmed leakage on the strength of the result change alone; the full 35 pairs have not been
+    individually reviewed (see &sect;9).</li>
   <li>Image resolution ranges from 66&times;67px to 2624&times;2932px (mean
     &asymp;237&times;239px) &mdash; all resized to 224&times;224px during preprocessing</li>
 </ul>
@@ -379,12 +384,19 @@ footer{
   CV) and explicitly records <span class="mono">split_method:
   stratified_image_level_fallback</span> in every results file, so this limitation travels with
   every downstream number rather than being forgotten after the split step.</p>
-<p><strong>Group-safe split (current, used for all &sect;7 results):</strong>
-  <span class="mono">src/dedupe_and_group_split.py</span> additionally groups near-duplicate
-  images (identified by the audit in &sect;3) so every image in a duplicate group lands on the
-  same side of every split &mdash; none can appear in train for one and test for another. This
-  is stricter than the plain stratified fallback above and is what changed the classical-vs-quantum
-  result in &sect;7; every group-safe result file records
+<p><strong>Group-safe split (current, used for all &sect;7 results):</strong> bundles two fixes.
+  First, a verified bug fix: the fallback pseudo-patient-ID above used to key on bare filename,
+  which collides across class folders in this dataset (e.g.
+  <span class="mono">test_100_0.jpg</span> exists under both <span class="mono">diabetic/</span>
+  and <span class="mono">pressure/</span>), silently forcing 191 of 559 fallback groups in the
+  previously-published split to span more than one true class. Now keyed on
+  <span class="mono">"label/filename"</span> instead, which is unique per image. Second, a more
+  conservative addition: <span class="mono">src/dedupe_and_group_split.py</span> also groups
+  visually near-duplicate images (flagged by the audit in &sect;3) so every image in a group lands
+  on the same side of every split. Together these changed 406 of 891 images' split assignment.
+  <strong>The filename-collision fix is the well-evidenced explanation for the changed
+  classical-vs-quantum result in &sect;7</strong> &mdash; see that section for why the
+  near-duplicate grouping is not claimed as the cause. Every group-safe result file records
   <span class="mono">split_method: dedupe_group_level</span>.</p>
 
 <h3>Preprocessing &amp; augmentation</h3>
@@ -605,13 +617,42 @@ footer{
     show why this report reports both tests rather than only the one that would have supported a
     stronger claim.</li>
 </ul>
-<p><strong>Read together, honestly:</strong> there is no statistically robust evidence, on this
-  corrected split, that the quantum circuit outperforms a classical model of any kind. The
-  earlier "quantum-hybrid significantly beats classical" finding does not replicate, and the most
-  likely explanation is that it was an artifact of near-duplicate leakage in the original split,
-  not a genuine effect of the quantum circuit. The one place quantum still looks favorable is CV
-  variance (&plusmn;2.1%, the lowest of the three) and inference latency (7.4ms vs. classical's
-  97.1ms) &mdash; real, measurable properties, just not "higher accuracy."</p>
+<p><strong>Why the earlier "significant quantum win" doesn't survive scrutiny &mdash; two
+  independent reasons, not one:</strong></p>
+<ol>
+  <li><strong>The statistical test itself was too generous.</strong> Re-running the significance
+    test on the <em>original, unchanged</em> 730-image CV results with the Nadeau-Bengio corrected
+    resampled t-test (added this session; see &sect;7 methodology list) turns the originally
+    reported p=0.0345 into <strong>p=0.104 (not significant)</strong> &mdash; with no split change
+    at all. The naive test's known bias (Dietterich, 1998) toward overstating significance on
+    overlapping CV folds was, on its own, enough to make the original claim not hold up.</li>
+  <li><strong>A real, verified split bug was also found and fixed.</strong>
+    <span class="mono">data_prep.py</span>'s fallback pseudo-patient-ID (used when no real
+    patient-ID file exists) keyed on bare filename, which collides across class folders in this
+    dataset (e.g. <span class="mono">test_100_0.jpg</span> exists under both
+    <span class="mono">diabetic/</span> and <span class="mono">pressure/</span>). This silently
+    forced 191 of 559 fallback pseudo-patient groups in the previously-published split to span
+    more than one true class label &mdash; a confirmed code bug, not a probabilistic inference.
+    Fixing it (keying on <span class="mono">"label/filename"</span> instead) changed 406 of 891
+    images' split assignment and is the most likely dominant cause of the numeric changes above.</li>
+</ol>
+<p>The group-safe split (&sect;4) also clusters visually near-duplicate images (flagged by the
+  audit in &sect;3) so they can't be split across train/test, as an additional, more conservative
+  safeguard bundled into the same fix. A small manual spot-check of 2 of the 35 flagged
+  cross-class pairs (viewing the actual images, not just the hash distance) found both to be
+  visually distinct wounds &mdash; different anatomy, framing, and appearance &mdash; suggesting
+  many of these hash matches are false positives of the coarse 8&times;8 average-hash rather than
+  genuine near-duplicates. This report does <strong>not</strong> claim the near-duplicate grouping
+  itself is what changed the result (that claim was not verified and the limited spot-check argues
+  against it); the filename-collision bug above is the well-evidenced explanation. Keeping the
+  near-duplicate groups together remains a reasonable conservative default regardless, and the
+  full 35 pairs have not yet been individually reviewed (see &sect;9).</p>
+<p><strong>Read together, honestly:</strong> there is no statistically robust evidence, on the
+  corrected split, that the quantum circuit outperforms a classical model of any kind, and the
+  original "significant" claim was already fragile under a more appropriate statistical test even
+  before any split change. The one place quantum still looks favorable is CV variance
+  (&plusmn;2.1%, the lowest of the three) and inference latency (7.4ms vs. classical's 97.1ms)
+  &mdash; real, measurable properties, just not "higher accuracy."</p>
 
 <h3 style="margin-top:32px;">Image + location multimodal fusion <span class="pill verified" style="margin-left:6px;">verified &mdash; new, best result in this study</span></h3>
 <p><strong>Scope note, important:</strong> AZH's wound-location metadata only covers the original
