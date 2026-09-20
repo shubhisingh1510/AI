@@ -613,6 +613,52 @@ footer{
   variance (&plusmn;2.1%, the lowest of the three) and inference latency (7.4ms vs. classical's
   97.1ms) &mdash; real, measurable properties, just not "higher accuracy."</p>
 
+<h3 style="margin-top:32px;">Image + location multimodal fusion <span class="pill verified" style="margin-left:6px;">verified &mdash; new, best result in this study</span></h3>
+<p><strong>Scope note, important:</strong> AZH's wound-location metadata only covers the original
+  730 AZH images &mdash; the 161-image Medetec supplement has no location labels. This experiment
+  trains and evaluates on <em>only</em> the 730 AZH images that have real location labels
+  (<span class="mono">src/multimodal_fusion.py</span>), group-safe split. It is reported
+  side-by-side with the 891-image results above, not as a replacement for them &mdash; the test
+  sets are different sizes and not directly comparable via paired significance tests.</p>
+<p>Same frozen ResNet-50 backbone as the other models, PCA-6 image features concatenated with a
+  learned embedding of the wound's body-location category (matching the fusion approach in
+  Anisuzzaman et al. 2022 and Patel et al. 2024, both cited in &sect;11), through a small MLP head:</p>
+<div class="stat-row">
+  <div class="stat"><div class="n">79.1%</div><div class="l">test accuracy</div></div>
+  <div class="stat"><div class="n">0.762</div><div class="l">macro F1</div></div>
+  <div class="stat"><div class="n">0.931</div><div class="l">macro ROC-AUC (OvR)</div></div>
+  <div class="stat"><div class="n">83.0% &plusmn; 3.0%</div><div class="l">5-fold CV mean accuracy</div></div>
+</div>
+<p>792 trainable parameters. This is the highest accuracy of every model tried in this study on
+  any split &mdash; higher than the full 891-image classical baseline (72.9%/75.2%), the matched
+  classical control (69.0%/79.5%), and both quantum variants (64.3%/75.9% and 50.4%/62.3%).
+  Unlike the quantum-capacity experiments (ablation grid, data re-uploading), which tried to
+  extract more from the <em>same</em> image-only signal and failed to help, this succeeds because
+  it adds a genuinely new source of information (body location) that the image alone doesn't
+  carry &mdash; consistent with why the cited prior work uses the same fusion approach.</p>
+<figure>
+  <img src="{{IMG_FUSION_CONFUSION}}" alt="Confusion matrix, image+location fusion">
+  <figcaption>Fig. 3c &mdash; Confusion matrix, image+location fusion, 730-image AZH-only
+    subset, group-safe split.</figcaption>
+</figure>
+<p><strong>Why this isn't simply substituted in as "the" headline number:</strong> it depends on
+  metadata (wound body-location) that only 730 of the 891 images have, so it answers a related
+  but different question ("what's achievable when location is known") rather than the main
+  study's question (classical vs. quantum on the full available image dataset). Both are reported
+  because both are true and neither one alone tells the full story.</p>
+
+<h3 style="margin-top:28px;">8-view test-time augmentation <span class="pill verified" style="margin-left:6px;">verified &mdash; new</span></h3>
+<p>Averaging softmax predictions over 8 deterministic views (identity + 3 rotations, each with/
+  without a horizontal flip) of the classical baseline's test images, with no retraining
+  (<span class="mono">scripts/eval_tta.py</span>, reusing the group-safe checkpoint):</p>
+<div class="stat-row">
+  <div class="stat"><div class="n">73.6%</div><div class="l">test accuracy (TTA)</div></div>
+  <div class="stat"><div class="n">+0.8pp</div><div class="l">vs. 72.9% non-TTA</div></div>
+</div>
+<p>A small, genuine, free improvement &mdash; reported as what it is (a single-split delta on 129
+  test images, not independently re-verified via cross-validation), not oversold as a major
+  result.</p>
+
 <h3 style="margin-top:28px;">Qubit &times; circuit-depth ablation <span class="pill verified" style="margin-left:6px;">from the prior (pre-correction) dataset</span></h3>
 <p><span class="mono">src/ablation.py</span> swept {4, 6, 8} qubits &times; {1, 2, 3}
   circuit-depth layers for both feature encodings on the earlier 730-image split (this sweep has
@@ -651,6 +697,9 @@ footer{
   <li>Qubit-count &times; circuit-depth &times; data-re-uploading ablation sweep</li>
   <li>Grad-CAM explainability (&sect;8)</li>
   <li>Efficiency comparison: trainable parameters, training time, inference latency</li>
+  <li>Multimodal (image+location) fusion, as an independent check of whether the bottleneck is
+    model capacity or missing information</li>
+  <li>Test-time augmentation, as a no-retraining robustness check</li>
 </ol>
 </section>
 
@@ -709,13 +758,16 @@ footer{
     (1.84x &rarr; 1.51x). No evidence on generalization to other cameras, lighting, or patient
     populations, and combining two sources introduces its own (unquantified) distribution-shift
     risk between them.</li>
-  <li><strong>No model in this study reaches high accuracy.</strong> Best 5-fold CV mean across
-    all three models tried is 79.5% (the matched-capacity classical control, &sect;7); test-set
-    accuracy tops out at 72.9%. Getting substantially higher would most likely require more data
-    and/or the missing arterial class, not further hyperparameter or circuit tuning &mdash; the
-    ablation and re-uploading results in &sect;7 are evidence for this, not just a guess: neither
-    increasing the quantum circuit's qubit/depth grid nor its re-uploading-based expressiveness
-    closed the gap.</li>
+  <li><strong>No image-only model in this study reaches high accuracy.</strong> Best 5-fold CV
+    mean among the image-only models on the full 891-image set is 79.5% (the matched-capacity
+    classical control, &sect;7); test-set accuracy tops out at 72.9%. Two direct attempts to get
+    more out of the quantum circuit specifically (the qubit/depth ablation grid, and
+    re-uploading) both failed to help &mdash; evidence that circuit/hyperparameter tuning is not
+    the bottleneck. What <em>did</em> help: adding wound body-location as a second input modality
+    (&sect;7's fusion result, 83.0%&plusmn;3.0% CV) &mdash; but only on the 730-image subset that
+    has real location labels, not the full 891. Closing that gap for the other 161 images (or
+    finding a second dataset with both images and location) is the most promising concrete next
+    step for further accuracy gains, more so than further model tuning on images alone.</li>
   <li><strong>Not a diagnostic tool.</strong> This is a research prototype. No claim here
     should be read as validated for clinical decision-making.</li>
 </ul>
@@ -734,6 +786,8 @@ footer{
 <tr><td>Matched-capacity classical control</td><td><span class="pill verified">complete &mdash; 69.0% test / 79.5%&plusmn;4.7% CV</span></td></tr>
 <tr><td>Quantum hybrid classifier (group-safe)</td><td><span class="pill verified">complete &mdash; 64.3% test / 75.9%&plusmn;2.1% CV</span></td></tr>
 <tr><td>Data re-uploading ablation</td><td><span class="pill verified">complete &mdash; negative result, 50.4% test</span></td></tr>
+<tr><td>Image+location multimodal fusion</td><td><span class="pill verified">complete &mdash; 79.1% test / 83.0%&plusmn;3.0% CV, best result in study</span></td></tr>
+<tr><td>8-view test-time augmentation</td><td><span class="pill verified">complete &mdash; 73.6% test (+0.8pp over non-TTA)</span></td></tr>
 <tr><td>Three-way statistical comparison</td><td><span class="pill verified">complete &mdash; no significant quantum advantage</span></td></tr>
 <tr><td>Qubit/depth ablation study</td><td><span class="pill na">complete on prior dataset only &mdash; not yet rerun group-safe</span></td></tr>
 <tr><td>Grad-CAM explainability</td><td><span class="pill na">complete on prior dataset only &mdash; not yet rerun group-safe</span></td></tr>

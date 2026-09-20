@@ -51,14 +51,30 @@ positive result is the split leakage described above, not a real quantum effect.
 real, still-standing advantages are efficiency (82 vs. 23.5M params, 7.4ms vs. 97.1ms inference)
 and the lowest CV variance of the three models — not accuracy.
 
-## On reaching higher accuracy
+## On reaching higher accuracy — update: found something that actually helps
 
-Best number achieved across all models and both quantum variants tried is 79.5% CV accuracy. I do
-not think 90%+ is reachable on this dataset as it stands — 891 images across 4 visually-similar
-ulcer classes, no arterial class, and the ablation/re-uploading results above are evidence that
-more circuit tuning isn't the bottleneck. Getting substantially higher would most likely require
-more data (ideally including the missing arterial class) rather than further hyperparameter or
-architecture tuning on the current dataset.
+Two more experiments since the numbers above:
+
+- **8-view test-time augmentation** on the classical model (no retraining, just averaging
+  predictions over 8 augmented views at inference): 72.9% → 73.6% test accuracy. Small but real
+  and free.
+- **Image + wound-location fusion** (concatenating a learned embedding of the wound's body
+  location with the image features, matching the approach in the two papers this project already
+  cites, Anisuzzaman et al. 2022 / Patel et al. 2024): **79.1% test / 83.0% ± 3.0% CV accuracy** —
+  the best result in the entire study, beating every image-only model tried. Only 792 trainable
+  parameters.
+
+**Important scope caveat:** this only works on 730 of the 891 images — the ones from AZH, which
+has real wound-location labels. The 161-image Medetec supplement (added earlier to fix class
+balance) has no location metadata, so this can't currently be applied to the full dataset. It's
+reported side-by-side with the 891-image numbers, not as a replacement for them.
+
+This is also a useful diagnostic: two attempts to squeeze more out of the *quantum circuit*
+specifically (qubit/depth ablation, data re-uploading) both failed. Adding a genuinely new
+information source (location) succeeded. That's consistent evidence that the bottleneck is
+missing information, not model/circuit capacity — the most promising next step for further
+accuracy gains is closing the location-metadata gap for the other 161 images (or finding a
+comparable dataset that ships both images and location for all its images), not more tuning.
 
 ## Known limitations (unchanged or newly noted)
 

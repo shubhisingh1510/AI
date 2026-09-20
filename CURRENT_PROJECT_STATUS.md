@@ -82,10 +82,17 @@ that used to be here are superseded; do not cite them as current.
   the default: it only reached ~31-37% test accuracy, barely above the 25% random baseline for 4
   classes (`results/ablation_results.csv`, from the prior 730-image dataset — not yet rerun
   group-safe). Config default is `feature_encoding: pca`.
-- **No path currently in evidence reaches 90%+ accuracy.** Best number is 79.5% CV (the matched
-  classical control). Both directions tried to increase the quantum model's capacity (ablation
-  grid, on the old dataset; data re-uploading, on the current one) failed to help or actively
-  hurt — the bottleneck looks like dataset size/quality, not circuit or model capacity.
+- **Update, same session:** two more experiments. (1) 8-view test-time augmentation on the
+  classical model (no retraining): 72.9% → 73.6% test accuracy, a small free gain. (2) Image +
+  wound-location fusion (`src/multimodal_fusion.py`, `--backbone-suffix _groupsafe`): **79.1%
+  test / 83.0% ± 3.0% CV — the best result in the whole study**, but scoped to only the 730 AZH
+  images with real location labels (the 161-image Medetec supplement has none), so it's reported
+  side-by-side with the 891-image numbers, not swapped in as a replacement. 792 params.
+- **Still no path in evidence reaches 90%+ on the full 891-image set.** But the fusion result is a
+  real, actionable diagnostic: two attempts to extract more from the quantum circuit specifically
+  (ablation grid, re-uploading) failed, while adding a genuinely new information source (location)
+  succeeded. The most promising next lever is closing the location-metadata gap for the other 161
+  images (or a comparable dataset with images+location for all images), not further model tuning.
 
 ## Current limitations
 
