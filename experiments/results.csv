@@ -1,0 +1,8 @@
+experiment_id,date,architecture,image_encoder,roi_method,location,morphology,quantum,loss,augmentation,optimizer,learning_rate,epochs,seed,cv_accuracy,cv_std,macro_f1,balanced_accuracy,test_accuracy,ece,notes
+classical_baseline_groupsafe,2026-09-18,classical_finetune,resnet50_finetuned,none,no,no,no,weighted_ce,standard,adam,0.001/0.00001,40,42,0.7521,0.0271,0.7311,,0.7287,,"Full fine-tune, group-safe split, 891 images"
+frozen_head_groupsafe,2026-09-18,frozen_matched_head,resnet50_frozen,none,no,no,no,weighted_ce,standard,adam,0.01,60,42,0.7949,0.0466,0.6924,,0.6899,,"81-param MLP head, matched to quantum param count"
+quantum_hybrid_groupsafe,2026-09-18,quantum_hybrid,resnet50_frozen,none,no,no,yes,weighted_ce,standard,adam,0.01,60,42,0.7591,0.0209,0.6499,,0.6434,,"6 qubits depth 3, PennyLane-Lightning adjoint"
+quantum_reupload_groupsafe,2026-09-18,quantum_hybrid_reupload,resnet50_frozen,none,no,no,yes,weighted_ce,standard,adam,0.01,60,42,0.6230,0.0531,,,0.5039,,"Data re-uploading ablation -- negative result"
+fusion_static_730subset,2026-09-18,static_concat_fusion,resnet50_frozen,none,yes,no,no,weighted_ce,standard,adam,0.01,60,42,0.8301,0.0301,0.7616,,0.7909,,"730-image AZH-only subset (has location); best result before AURA-Wound"
+ensemble_soft_voting,2026-09-18,soft_voting_ensemble,resnet50_frozen+quantum,none,no,no,yes,,,,,,42,,,0.7170,,0.7132,,"classical+frozen_head+quantum averaged probs; worse than classical alone"
+tta_8view_classical,2026-09-18,tta_eval,resnet50_finetuned,none,no,no,no,,,,,,42,,,,,0.7364,,"8-view TTA on classical checkpoint, no retraining; +0.8pp vs 0.7287"

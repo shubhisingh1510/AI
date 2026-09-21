@@ -1,39 +1,40 @@
 {
   "models": [
     "classical",
-    "frozen_head"
+    "frozen_head",
+    "quantum"
   ],
   "test_metrics": {
-    "accuracy": 0.7286821705426356,
-    "precision_macro": 0.7364372077786712,
-    "recall_macro": 0.7367938434114905,
-    "f1_macro": 0.7295910388146224,
+    "accuracy": 0.7131782945736435,
+    "precision_macro": 0.7175033379774759,
+    "recall_macro": 0.7241275880981763,
+    "f1_macro": 0.7169694996793673,
     "confusion_matrix": [
       [
-        22,
-        4,
+        20,
+        6,
         3,
         5
       ],
       [
-        6,
+        7,
         21,
-        3,
+        2,
         6
       ],
       [
-        4,
+        3,
         1,
-        21,
+        22,
         0
       ],
       [
         3,
+        1,
         0,
-        0,
-        30
+        29
       ]
     ],
-    "roc_auc_ovr_macro": 0.8975325332645024
+    "roc_auc_ovr_macro": 0.8931822530104351
   }
 }

@@ -1,0 +1,51 @@
+{
+  "model": "aura_wound",
+  "active_branches": [
+    "image",
+    "quantum"
+  ],
+  "adaptive_gate": false,
+  "location_dropout_p": null,
+  "common_dim": 8,
+  "seed": 42,
+  "n_params": 234,
+  "train_time_s": 391.3469395637512,
+  "test_metrics": {
+    "accuracy": 0.6821705426356589,
+    "precision_macro": 0.6896300186741363,
+    "recall_macro": 0.6877056766762649,
+    "f1_macro": 0.6878260869565218,
+    "confusion_matrix": [
+      [
+        20,
+        9,
+        2,
+        3
+      ],
+      [
+        7,
+        21,
+        3,
+        5
+      ],
+      [
+        5,
+        2,
+        19,
+        0
+      ],
+      [
+        3,
+        2,
+        0,
+        28
+      ]
+    ],
+    "roc_auc_ovr_macro": 0.8853312671624078
+  },
+  "alpha_mean_by_branch": null,
+  "cv_fold_metrics": [],
+  "cv_mean_accuracy": null,
+  "cv_std_accuracy": null,
+  "smoke_test": false
+}
