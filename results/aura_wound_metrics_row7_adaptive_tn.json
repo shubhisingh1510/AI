@@ -1,0 +1,231 @@
+{
+  "model": "aura_wound",
+  "active_branches": [
+    "image",
+    "roi",
+    "location",
+    "morphology",
+    "tensor_network"
+  ],
+  "adaptive_gate": true,
+  "location_dropout_p": 0.3,
+  "common_dim": 8,
+  "seed": 42,
+  "n_params": 2689,
+  "train_time_s": 91.95595669746399,
+  "test_metrics": {
+    "accuracy": 0.7131782945736435,
+    "precision_macro": 0.7129270247029393,
+    "recall_macro": 0.7233105946341241,
+    "f1_macro": 0.7114921644333408,
+    "confusion_matrix": [
+      [
+        18,
+        6,
+        5,
+        5
+      ],
+      [
+        5,
+        23,
+        2,
+        6
+      ],
+      [
+        1,
+        2,
+        22,
+        1
+      ],
+      [
+        2,
+        1,
+        1,
+        29
+      ]
+    ],
+    "roc_auc_ovr_macro": 0.8899739589349666
+  },
+  "alpha_mean_by_branch": {
+    "image": 0.8887923359870911,
+    "roi": 0.10076653212308884,
+    "location": 0.0047045606188476086,
+    "morphology": 0.0019100815989077091,
+    "tensor_network": 0.003826456842944026
+  },
+  "cv_fold_metrics": [
+    {
+      "accuracy": 0.743455497382199,
+      "precision_macro": 0.7504709874943304,
+      "recall_macro": 0.7480517064735421,
+      "f1_macro": 0.7418245595963073,
+      "confusion_matrix": [
+        [
+          31,
+          10,
+          5,
+          1
+        ],
+        [
+          7,
+          40,
+          4,
+          2
+        ],
+        [
+          1,
+          5,
+          28,
+          0
+        ],
+        [
+          1,
+          6,
+          7,
+          43
+        ]
+      ],
+      "roc_auc_ovr_macro": 0.9366355790593912,
+      "fold": 0
+    },
+    {
+      "accuracy": 0.8421052631578947,
+      "precision_macro": 0.8377762066365008,
+      "recall_macro": 0.8426754461221688,
+      "f1_macro": 0.8386536395934893,
+      "confusion_matrix": [
+        [
+          33,
+          9,
+          2,
+          1
+        ],
+        [
+          4,
+          37,
+          5,
+          1
+        ],
+        [
+          2,
+          1,
+          27,
+          1
+        ],
+        [
+          0,
+          1,
+          0,
+          47
+        ]
+      ],
+      "roc_auc_ovr_macro": 0.9562875971014806,
+      "fold": 1
+    },
+    {
+      "accuracy": 0.8285714285714286,
+      "precision_macro": 0.8313589567604667,
+      "recall_macro": 0.8271640540274081,
+      "f1_macro": 0.8277574664300047,
+      "confusion_matrix": [
+        [
+          37,
+          7,
+          1,
+          1
+        ],
+        [
+          6,
+          37,
+          3,
+          3
+        ],
+        [
+          3,
+          3,
+          27,
+          2
+        ],
+        [
+          1,
+          0,
+          0,
+          44
+        ]
+      ],
+      "roc_auc_ovr_macro": 0.9462945892142566,
+      "fold": 2
+    },
+    {
+      "accuracy": 0.8176795580110497,
+      "precision_macro": 0.8245590075947219,
+      "recall_macro": 0.8316326530612245,
+      "f1_macro": 0.8242155312829357,
+      "confusion_matrix": [
+        [
+          33,
+          14,
+          1,
+          1
+        ],
+        [
+          5,
+          34,
+          2,
+          8
+        ],
+        [
+          0,
+          0,
+          34,
+          0
+        ],
+        [
+          1,
+          1,
+          0,
+          47
+        ]
+      ],
+      "roc_auc_ovr_macro": 0.9494638764596748,
+      "fold": 3
+    },
+    {
+      "accuracy": 0.7283236994219653,
+      "precision_macro": 0.7307873002573464,
+      "recall_macro": 0.7391766489204378,
+      "f1_macro": 0.7265459508204515,
+      "confusion_matrix": [
+        [
+          32,
+          8,
+          2,
+          4
+        ],
+        [
+          13,
+          23,
+          4,
+          9
+        ],
+        [
+          3,
+          1,
+          25,
+          1
+        ],
+        [
+          1,
+          1,
+          0,
+          46
+        ]
+      ],
+      "roc_auc_ovr_macro": 0.9238128740756228,
+      "fold": 4
+    }
+  ],
+  "cv_mean_accuracy": 0.7920270893089075,
+  "cv_std_accuracy": 0.046730467158119626,
+  "smoke_test": false
+}
