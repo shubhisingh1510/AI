@@ -93,6 +93,8 @@ ENCODERS = {
     "dinov2_vits14": (lambda: _dinov2("dinov2_vits14"), 224),
     "dinov2_vitb14": (lambda: _dinov2("dinov2_vitb14"), 224),
     "dinov2_vitl14": (lambda: _dinov2("dinov2_vitl14"), 224),
+    # same ViT-B weights at twice the resolution (4x the patch tokens): does detail help?
+    "dinov2_vitb14_448": (lambda: _dinov2("dinov2_vitb14"), 448),
 }
 
 

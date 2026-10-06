@@ -5,7 +5,7 @@ you can run your first experiment without installing anything.
 
 Repo: https://github.com/shubhisingh1510/AI (branch `main`)
 
-## Where the accuracy stands (4 Oct 2026)
+## Where the accuracy stands (6 Oct 2026)
 
 The task: classify a wound photo as diabetic, pressure, surgical or venous. 891 images, tested on a
 "group-safe" split, meaning near-identical photos never sit on both sides of train and test.
@@ -17,14 +17,19 @@ The task: classify a wound photo as diabetic, pressure, surgical or venous. 891 
 | **DINOv2 ViT-B, frozen, linear classifier (new)** | **80.6%** | **81.4% ± 3.7** |
 | DINOv2 ViT-S, frozen, linear classifier (new) | 77.5% | 80.7% ± 1.9 |
 | Five frozen encoders concatenated (new) | 79.8% | 82.4% ± 2.2 |
+| DINOv2 ViT-B at 448 px, frozen (6 Oct) | 78.3% | 80.3% ± 2.4 |
+| DINOv2 ViT-L, frozen, linear classifier (6 Oct) | 81.4% | 82.6% ± 2.5 |
+| **DINOv2 ViT-B + ViT-B 448 px + ViT-L concatenated (6 Oct)** | **82.9%** | **83.4% ± 3.6** |
 
 The new rows come from `src/foundation_probe.py`; every number is in
 `results/foundation_probe_metrics.json`, and the full history is in `experiments/results.csv`.
 
 **The target is 90%. We are not there.** Swapping the ResNet-50 for a stronger pretrained encoder
-gave about 8 points on the test split without training the encoder at all. The open question is
-how much more fine-tuning that encoder gives, and that needs a GPU, which is the main thing to do
-next.
+gave about 8 points on the test split without training the encoder at all. Making the frozen
+encoder bigger (ViT-L) or joining several together adds only 1-2 points more, and feeding it
+448 px images instead of 224 px adds nothing, so the frozen approach has levelled off at about
+83%. The open question is how much more fine-tuning that encoder gives, and that needs a GPU,
+which is the main thing to do next. It has not been run yet.
 
 ## The one rule
 
@@ -59,13 +64,18 @@ Run the notebook as is first. Then change one setting at a time and record each 
 `--size 224` vs `448`, `--lr 2e-5` / `1e-4`, `--layer-decay 0.65` / `0.85`, and
 `--model dinov2_vitl14 --batch-size 8`.
 
-**B. The large frozen encoder.** `dinov2_vitl14` is too slow for a laptop CPU. The notebook's
-step 2 already runs it on the GPU; record its row.
+**B. The large frozen encoder.** Done on 6 Oct (it does run on a laptop CPU, about 15 minutes
+plus a 1.1 GB download): 81.4% test, 82.6% CV. The rows are in `experiments/results.csv`.
 
 **C. Look at the mistakes.** In `results/foundation_probe_metrics.json` each model has a confusion
 matrix. Which two classes get mixed up most? Open ten of those images and write two or three
 sentences on what they have in common. This goes straight into the paper's discussion section and
 tells us what to fix.
+A first pass on the DINOv2 ViT-B cross-validation predictions (6 Oct): venous is right 92% of the
+time, diabetic 82%, pressure 75%, surgical 74%. The biggest mix-up is pressure called diabetic
+(36 images) and diabetic called pressure (19). Pressure images from the AZH source are the
+weakest group at 67%, while the Medetec pressure images are at 84%. Nobody has looked at the
+actual images yet; that part is still open.
 
 **D. Wound location.** 730 of the images have a recorded body location. With the old ResNet-50
 features, adding it gave about 4 points; with DINOv2 ViT-B it gave almost nothing (82.4% → 82.5%
