@@ -20,6 +20,17 @@ data:
 classical:
   backbone: "resnet50"
   pretrained: true
+  # optimizer: sgd -- switched from the implicit Adam default during the TensorFlow/Keras port
+  # (2026-09-21). Adam's step size is normalized by each parameter's own gradient magnitude, so
+  # even lr_finetune=1e-5 took a step of comparable size to a late-ResNet-block kernel's own
+  # weight scale the moment a block unfroze -- verified directly: a single Adam step at that lr
+  # shifted a conv5 kernel by ~36% of its typical magnitude and sent val_loss from ~1.3 to
+  # 1474 within a couple epochs (results/classical_tf_groupsafe_run.log, 2026-09-21). SGD+
+  # momentum takes a step proportional to the true (small, clipped) gradient instead, and is
+  # the standard choice for fine-tuning already-converged pretrained CNN weights for exactly
+  # this reason. Confirmed stable in isolation before switching the full run over.
+  optimizer: "sgd"
+  momentum: 0.9
   freeze_backbone_epochs: 5      # epochs with early layers frozen before optional unfreeze
   unfreeze_after: true           # only used when gradual_unfreezing is false
   batch_size: 32
@@ -76,6 +87,21 @@ quantum:
   weight_decay: 0.0
   early_stopping_patience: 10
   diff_method: "adjoint"   # PennyLane-Lightning analytic gradients
+
+tensor_network:
+  # Classical Matrix Product State (MPS) hybrid head -- Stoudenmire & Schwab (2016)
+  # "quantum-inspired tensor network" classifier, src/tensor_network.py. Requested as a
+  # drop-in replacement for the quantum branch after quantum_hybrid_groupsafe underperformed
+  # (0.6434 test vs 0.7287 classical, see experiments/results.csv). Uses the SAME frozen
+  # ResNet-50 features / PCA-to-6-dims pipeline as the quantum branch for a fair comparison.
+  feature_encoding: "pca"
+  pca_dims: 6            # matches quantum.num_qubits so the two branches see identical inputs
+  bond_dim: 6             # MPS bond dimension; expressivity knob analogous to circuit_depth
+  batch_size: 32
+  epochs: 60
+  lr: 0.01
+  weight_decay: 0.0
+  early_stopping_patience: 10
 
 ablation:
   qubit_counts: [4, 6, 8]

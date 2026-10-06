@@ -1,13 +1,13 @@
 """
 Grad-CAM on the classical CNN backbone (last conv block of ResNet-50) for a handful of test
 images: some correctly classified, some misclassified, saved to figures/gradcam_examples/.
+TensorFlow/Keras port (2026-09-21) of the original PyTorch implementation, using
+tf.GradientTape against the last conv block's activation instead of forward/backward hooks.
 
-NOTE on the quantum side: there is no established, standard explainability method for
-variational quantum circuits comparable to Grad-CAM in this codebase. Methods like quantum
-Shapley values or parameter-shift-based saliency exist in the literature but are not
-implemented here — implementing an ad hoc "quantum Grad-CAM" would be fabricating a method
-with no accepted validity, so we deliberately do not do that. If quantum-side explainability
-is required, it should be scoped as a stated limitation of this project, not simulated.
+NOTE on the quantum/tensor-network side: there is no established, standard explainability
+method for variational quantum circuits or MPS classifiers comparable to Grad-CAM in this
+codebase. Implementing an ad hoc version would be fabricating a method with no accepted
+validity, so we deliberately do not do that -- scoped as a stated limitation instead.
 
 Run: python src/explainability.py --config configs/config.yaml
 """
@@ -17,42 +17,33 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn.functional as F
-import yaml
+import tensorflow as tf
 from PIL import Image
 
 from classical_baseline import build_model, build_transforms, load_config, set_seed
 
 
 class GradCAM:
-    """Minimal Grad-CAM implementation (no external grad-cam package dependency required)."""
+    """Minimal Grad-CAM implementation using tf.GradientTape against the last conv block's
+    output activation map (model.backbone's final layer before the average-pool)."""
 
-    def __init__(self, model, target_layer):
+    def __init__(self, model, target_layer_name="conv5_block3_out"):
         self.model = model
-        self.activations = None
-        self.gradients = None
-        target_layer.register_forward_hook(self._save_activation)
-        target_layer.register_full_backward_hook(self._save_gradient)
-
-    def _save_activation(self, module, inp, out):
-        self.activations = out.detach()
-
-    def _save_gradient(self, module, grad_in, grad_out):
-        self.gradients = grad_out[0].detach()
+        self.grad_model = tf.keras.Model(
+            model.inputs, [model.backbone.get_layer(target_layer_name).output, model.output],
+        )
 
     def __call__(self, x, class_idx):
-        self.model.zero_grad()
-        output = self.model(x)
-        score = output[0, class_idx]
-        score.backward()
-
-        weights = self.gradients.mean(dim=(2, 3), keepdim=True)  # global-avg-pool gradients
-        cam = F.relu((weights * self.activations).sum(dim=1, keepdim=True))
-        cam = F.interpolate(cam, size=x.shape[2:], mode="bilinear", align_corners=False)
-        cam = cam.squeeze().cpu().numpy()
+        with tf.GradientTape() as tape:
+            activations, output = self.grad_model(x, training=False)
+            score = output[:, class_idx]
+        grads = tape.gradient(score, activations)
+        weights = tf.reduce_mean(grads, axis=(1, 2), keepdims=True)  # global-avg-pool gradients
+        cam = tf.nn.relu(tf.reduce_sum(weights * activations, axis=-1, keepdims=True))
+        cam = tf.image.resize(cam, size=(x.shape[1], x.shape[2]), method="bilinear")
+        cam = cam[0, :, :, 0].numpy()
         cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-        return cam, output.detach()
+        return cam, output.numpy()
 
 
 def overlay_cam_on_image(pil_img, cam, out_path):
@@ -80,14 +71,8 @@ def main():
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--n-correct", type=int, default=3)
     parser.add_argument("--n-incorrect", type=int, default=3)
-    parser.add_argument("--input-suffix", default="",
-                         help="Matches --output-suffix used by classical_baseline.py (e.g. "
-                              "'_groupsafe'), so this renders Grad-CAM for that model's "
-                              "checkpoint/predictions instead of the unsuffixed default.")
-    parser.add_argument("--splits-metadata", default="run_metadata.json",
-                         help="Which data/splits/*.json to read for image filepaths (e.g. "
-                              "run_metadata_groupsafe.json) -- must match the split the "
-                              "checkpoint above was trained on.")
+    parser.add_argument("--input-suffix", default="")
+    parser.add_argument("--splits-metadata", default="run_metadata.json")
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
@@ -98,7 +83,6 @@ def main():
         config_path = candidate if candidate.exists() else config_path
     cfg = load_config(str(config_path))
     set_seed(cfg["seed"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     results_dir = research_root / cfg["paths"]["results_dir"]
     figures_dir = research_root / cfg["paths"]["figures_dir"]
@@ -107,7 +91,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pred_path = results_dir / f"classical_test_predictions{suf}.json"
-    ckpt_path = results_dir / f"classical_backbone_state{suf}.pt"
+    ckpt_path = results_dir / f"classical_backbone_state{suf}.weights.h5"
     if not pred_path.exists() or not ckpt_path.exists():
         print(f"Missing {pred_path.name} or {ckpt_path.name}. Run classical_baseline.py first "
               f"(with --output-suffix {suf!r} if that's what you passed here).")
@@ -118,12 +102,9 @@ def main():
     classes = preds["classes"]
     n_classes = len(classes)
 
-    model = build_model(n_classes, cfg["classical"]["pretrained"]).to(device)
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    model.eval()
-
-    target_layer = model.layer4[-1]
-    gradcam = GradCAM(model, target_layer)
+    model = build_model(n_classes, cfg["classical"]["pretrained"], cfg["classical"].get("backbone", "resnet50"))
+    model.load_weights(str(ckpt_path))
+    gradcam = GradCAM(model)
 
     _, eval_tf = build_transforms(cfg)
 
@@ -137,10 +118,6 @@ def main():
     with open(splits_dir / args.splits_metadata) as f:
         meta = json.load(f)
     split_df = pd.read_csv(splits_dir / meta["train_val_test_split_file"])
-    # Bare filenames collide across class folders in this dataset (e.g. both
-    # healthy/10.jpg and ulcer/10.jpg exist) -- key on "label/filename", matching the
-    # unique image id WoundImageDataset returns and that classical_test_predictions.json
-    # stores in "filenames".
     image_id_to_path = dict(zip(split_df["label"] + "/" + split_df["filename"], split_df["filepath"]))
 
     def render(idx_list, tag, n):
@@ -151,14 +128,11 @@ def main():
             if not fp.is_absolute():
                 fp = research_root / fp
             img = Image.open(fp).convert("RGB")
-            x = eval_tf(img).unsqueeze(0).to(device)
-            # Backbone weights are frozen (requires_grad=False), so gradients only flow if
-            # the input itself requires grad — needed for Grad-CAM's backward hook to fire.
-            x.requires_grad_(True)
+            x = eval_tf(img)[None, ...]
 
             pred_class = int(y_pred[idx])
             true_class = int(y_true[idx])
-            cam, _ = gradcam(x, pred_class)
+            cam, _ = gradcam(tf.constant(x, dtype=tf.float32), pred_class)
 
             safe_fname = fname.replace("/", "_")
             out_path = out_dir / f"{tag}_{rank}_{safe_fname}_true-{classes[true_class]}_pred-{classes[pred_class]}.png"

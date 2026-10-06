@@ -20,7 +20,6 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
-import torch
 import yaml
 
 from classical_baseline import load_config, set_seed
@@ -45,7 +44,6 @@ def main():
         config_path = candidate if candidate.exists() else config_path
     cfg = load_config(str(config_path))
     set_seed(cfg["seed"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     qubit_counts = cfg["ablation"]["qubit_counts"]
     depths = cfg["ablation"]["circuit_depths"]

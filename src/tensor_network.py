@@ -1,28 +1,20 @@
 """
-Hybrid quantum-classical model: reuses the FROZEN ResNet-50 backbone trained in
-classical_baseline.py as a feature extractor (never retrained here, so the comparison in
-evaluate_compare.py is apples-to-apples on the same CNN representation), then:
-  1. PCA-reduces the 2048-d penultimate features to N = num_qubits dimensions.
-  2. Angle-encodes the N features into an N-qubit variational circuit
-     (StronglyEntanglingLayers), run through PennyLane-Lightning's adjoint-method analytic
-     gradients, with TensorFlow as the autodiff interface (qml.qnode(interface="tf")).
-  3. Measures PauliZ expectation values, wrapped in a small custom keras.layers.Layer so it
-     trains inside a normal Keras/TF loop (PennyLane's qml.qnn.KerasLayer helper was removed
-     from this PennyLane version, so the wrapper is written by hand here).
-  4. Adds a small classical Dense layer mapping the N expectation values to class logits.
+Classical tensor-network (Matrix Product State) hybrid model -- a drop-in, purely-classical
+replacement for the PennyLane quantum branch in quantum_hybrid.py, requested after the QNN
+branch underperformed the classical baseline. TensorFlow/Keras port (2026-09-21) of the
+original PyTorch implementation, alongside the rest of the pipeline's framework migration.
 
-TensorFlow/Keras port (2026-09-21) of the original PyTorch implementation. NOTE: PennyLane's
-own TensorFlow interface is itself deprecated upstream (PennyLaneDeprecationWarning: "Support
-for the TensorFlow interface is deprecated... migrate to JAX or PyTorch") -- it still works on
-the installed PennyLane 0.44.1 / lightning.qubit combination used here (verified with a
-gradient-flow smoke test before this port), but this is a real upstream constraint worth
-flagging, not a design choice: the quantum branch is the one place in this migration fighting
-against the library's own direction.
+This is the "quantum-inspired tensor network" family (Stoudenmire & Schwab, NeurIPS 2016,
+"Supervised Learning with Tensor Networks"): the same chain-of-small-tensors contraction
+structure a quantum circuit's classical simulator would use, but run directly as classical
+TensorFlow tensors -- no qml.device, no statevector simulation, no claim of quantum behavior.
 
-Only this small hybrid head is trained; the CNN backbone stays frozen. Evaluated with the
-same metrics on the same test split and same 5-fold CV splits as classical_baseline.py.
+Reuses the SAME frozen ResNet-50 backbone and the SAME feature pipeline (PCA-to-6-dims,
+per-dimension scaling) as quantum_hybrid.py, so results are directly comparable to
+results/quantum_metrics_tf_groupsafe.json on the same test/CV splits.
 
-Run: python src/quantum_hybrid.py --config configs/config.yaml
+Run: python src/tensor_network.py --config configs/config.yaml --output-suffix _tf_groupsafe \
+     --splits-metadata run_metadata_groupsafe.json
 """
 import argparse
 import json
@@ -31,7 +23,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pennylane as qml
 import tensorflow as tf
 from sklearn.decomposition import PCA
 from tensorflow import keras
@@ -44,77 +35,70 @@ from classical_baseline import (
     set_seed,
 )
 from domain_features import N_DOMAIN_FEATURES, extract_domain_features_for_df
+from quantum_hybrid import get_cnn_features, load_backbone_for_features
 
 
-class QuantumLayer(keras.layers.Layer):
-    """Angle-encoded PCA features -> StronglyEntanglingLayers circuit -> PauliZ expectation
-    values, as a Keras layer. Circuit weights are a float64 Keras weight (PennyLane's TF
-    interface requires float64 for stable adjoint-method gradients; cast in/out of float32 at
-    the layer boundary so it composes with the rest of the float32 Keras model)."""
+class MPSClassifier(keras.layers.Layer):
+    """Matrix Product State classifier (Stoudenmire & Schwab 2016).
 
-    def __init__(self, num_qubits: int, circuit_depth: int, diff_method: str,
-                 data_reuploading: bool = False, **kwargs):
+    A chain of n_features small tensors ("cores"), one of which carries an extra output leg
+    of size n_classes. Each scalar input feature x_i is mapped to a 2-component local vector
+    phi(x_i) = [cos(x_i), sin(x_i)] -- the same role the AngleEmbedding rotation plays for a
+    qubit, but here it is just a 2-vector, not a quantum state. The cores are contracted left
+    to right against phi(x_i), carrying a `bond_dim`-sized classical vector between sites,
+    until the label core injects the n_classes output leg partway through the chain.
+    """
+
+    def __init__(self, n_features: int, bond_dim: int, n_classes: int, label_position: int = None, **kwargs):
         super().__init__(**kwargs)
-        self.num_qubits = num_qubits
-        self.circuit_depth = circuit_depth
-        self.data_reuploading = data_reuploading
-        dev = qml.device("lightning.qubit", wires=num_qubits)
-
-        if data_reuploading:
-            @qml.qnode(dev, interface="tf", diff_method=diff_method)
-            def circuit(inputs, weights):
-                for layer_idx in range(circuit_depth):
-                    qml.AngleEmbedding(inputs, wires=range(num_qubits), rotation="Y")
-                    qml.StronglyEntanglingLayers(weights[layer_idx:layer_idx + 1], wires=range(num_qubits))
-                return [qml.expval(qml.PauliZ(w)) for w in range(num_qubits)]
-        else:
-            @qml.qnode(dev, interface="tf", diff_method=diff_method)
-            def circuit(inputs, weights):
-                qml.AngleEmbedding(inputs, wires=range(num_qubits), rotation="Y")
-                qml.StronglyEntanglingLayers(weights, wires=range(num_qubits))
-                return [qml.expval(qml.PauliZ(w)) for w in range(num_qubits)]
-
-        self.circuit = circuit
+        self.n_features = n_features
+        self.bond_dim = bond_dim
+        self.n_classes = n_classes
+        self.label_position = n_features // 2 if label_position is None else label_position
 
     def build(self, input_shape):
-        self.qweights = self.add_weight(
-            name="qweights", shape=(self.circuit_depth, self.num_qubits, 3),
-            initializer=keras.initializers.RandomUniform(0, 2 * np.pi),
-            dtype=tf.float64, trainable=True,
-        )
+        phys_dim = 2
+        self.cores = []
+        for i in range(self.n_features):
+            left = 1 if i == 0 else self.bond_dim
+            right = 1 if i == self.n_features - 1 else self.bond_dim
+            shape = (left, phys_dim, self.n_classes, right) if i == self.label_position else (left, phys_dim, right)
+            core = self.add_weight(
+                name=f"core_{i}", shape=shape,
+                initializer=keras.initializers.RandomNormal(stddev=1.0 / (self.bond_dim ** 0.5)),
+                trainable=True,
+            )
+            self.cores.append(core)
         super().build(input_shape)
 
-    def call(self, inputs):
-        inputs64 = tf.cast(inputs, tf.float64)
-        outs = self.circuit(inputs64, self.qweights)
-        out = tf.stack(outs, axis=1)
-        return tf.cast(out, tf.float32)
+    @staticmethod
+    def feature_map(x):
+        return tf.stack([tf.cos(x), tf.sin(x)], axis=-1)  # (batch, n_features, 2)
+
+    def call(self, x):
+        batch = tf.shape(x)[0]
+        phi = self.feature_map(x)
+        vec = tf.ones((batch, 1), dtype=x.dtype)  # left boundary vector
+        for i, core in enumerate(self.cores):
+            xi = phi[:, i, :]
+            core = tf.cast(core, x.dtype)
+            if i == self.label_position:
+                vec = tf.einsum("bl,lpcr,bp->bcr", vec, core, xi)
+            elif len(vec.shape) == 2:
+                vec = tf.einsum("bl,lpr,bp->br", vec, core, xi)
+            else:
+                vec = tf.einsum("bcl,lpr,bp->bcr", vec, core, xi)
+        return tf.squeeze(vec, axis=-1)  # (batch, n_classes)
 
 
-def build_quantum_layer(num_qubits: int, circuit_depth: int, diff_method: str,
-                         data_reuploading: bool = False) -> QuantumLayer:
-    return QuantumLayer(num_qubits, circuit_depth, diff_method, data_reuploading)
+def build_tensor_network_layer(num_features: int, bond_dim: int, n_classes: int) -> MPSClassifier:
+    return MPSClassifier(num_features, bond_dim, n_classes)
 
 
-def build_hybrid_head(num_qubits: int, circuit_depth: int, n_classes: int, diff_method: str,
-                       data_reuploading: bool = False) -> keras.Model:
-    inputs = keras.Input(shape=(num_qubits,))
-    q_out = QuantumLayer(num_qubits, circuit_depth, diff_method, data_reuploading)(inputs)
-    logits = keras.layers.Dense(n_classes)(q_out)
-    return keras.Model(inputs, logits, name="hybrid_head")
-
-
-def load_backbone_for_features(weights_path, n_classes, pretrained, backbone="resnet50", head_dropout=0.0):
-    from classical_baseline import build_model
-    model = build_model(n_classes, pretrained, backbone, head_dropout)
-    if weights_path is not None:
-        model.load_weights(str(weights_path))
-    return model
-
-
-def get_cnn_features(model, images, labels, files):
-    feats = model.feature_extractor(tf.constant(images), training=False).numpy()
-    return feats, None, None, labels, files
+def build_tn_head(num_features: int, bond_dim: int, n_classes: int) -> keras.Model:
+    inputs = keras.Input(shape=(num_features,))
+    logits = MPSClassifier(num_features, bond_dim, n_classes)(inputs)
+    return keras.Model(inputs, logits, name="tn_head")
 
 
 def weighted_ce_loss_logits(class_weights):
@@ -130,13 +114,13 @@ def weighted_ce_loss_logits(class_weights):
     return loss_fn
 
 
-def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg):
+def train_tn(head, train_feats, train_labels, val_feats, val_labels, tncfg):
     train_x = tf.constant(train_feats, dtype=tf.float32)
     train_y = tf.constant(train_labels, dtype=tf.int64)
     val_x = tf.constant(val_feats, dtype=tf.float32)
     val_y = tf.constant(val_labels, dtype=tf.int64)
 
-    optimizer = keras.optimizers.Adam(learning_rate=qcfg["lr"])
+    optimizer = keras.optimizers.Adam(learning_rate=tncfg["lr"])
     n_classes = head.output_shape[-1]
     counts = np.maximum(np.bincount(train_labels, minlength=n_classes).astype(np.float64), 1)
     class_weights = counts.sum() / (n_classes * counts)
@@ -147,10 +131,10 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg):
     patience_counter = 0
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
-    batch_size = qcfg["batch_size"]
+    batch_size = tncfg["batch_size"]
     n_train = train_x.shape[0]
 
-    for epoch in range(qcfg["epochs"]):
+    for epoch in range(tncfg["epochs"]):
         perm = np.random.permutation(n_train)
         total_loss, n_correct = 0.0, 0
         for i in range(0, n_train, batch_size):
@@ -174,7 +158,7 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg):
         history["val_loss"].append(val_loss)
         history["train_acc"].append(train_acc)
         history["val_acc"].append(val_acc)
-        print(f"[hybrid] Epoch {epoch+1}/{qcfg['epochs']} train_loss={train_loss:.4f} "
+        print(f"[tn] Epoch {epoch+1}/{tncfg['epochs']} train_loss={train_loss:.4f} "
               f"train_acc={train_acc:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
 
         if val_loss < best_val_loss - 1e-5:
@@ -183,8 +167,8 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg):
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= qcfg["early_stopping_patience"]:
-                print(f"[hybrid] Early stopping at epoch {epoch+1}.")
+            if patience_counter >= tncfg["early_stopping_patience"]:
+                print(f"[tn] Early stopping at epoch {epoch+1}.")
                 break
 
     if best_weights is not None:
@@ -193,31 +177,22 @@ def train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg):
     return head, history
 
 
-def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
-                         feature_encoding=None, smoke_test=False, data_reuploading=None,
-                         splits_metadata="run_metadata.json", output_suffix="", backbone_suffix=None):
-    qcfg = dict(cfg["quantum"])
-    if num_qubits is not None:
-        qcfg["num_qubits"] = num_qubits
-        qcfg["pca_dims"] = num_qubits
-    if circuit_depth is not None:
-        qcfg["circuit_depth"] = circuit_depth
+def run_tn_pipeline(cfg, research_root, bond_dim=None, feature_encoding=None,
+                     smoke_test=False, splits_metadata="run_metadata.json", output_suffix="",
+                     backbone_suffix=None, skip_cv=False):
+    tncfg = dict(cfg["tensor_network"])
+    if bond_dim is not None:
+        tncfg["bond_dim"] = bond_dim
     if feature_encoding is not None:
-        qcfg["feature_encoding"] = feature_encoding
-    if data_reuploading is not None:
-        qcfg["data_reuploading"] = data_reuploading
+        tncfg["feature_encoding"] = feature_encoding
     if smoke_test:
-        qcfg["epochs"] = 1
-        qcfg["early_stopping_patience"] = 1
+        tncfg["epochs"] = 1
+        tncfg["early_stopping_patience"] = 1
 
-    feature_encoding = qcfg.get("feature_encoding", "pca")
+    feature_encoding = tncfg.get("feature_encoding", "pca")
     if feature_encoding not in ("pca", "domain"):
-        raise ValueError(f"quantum.feature_encoding must be 'pca' or 'domain', got {feature_encoding!r}")
-    if feature_encoding == "domain" and qcfg["num_qubits"] != N_DOMAIN_FEATURES:
-        raise ValueError(
-            f"feature_encoding='domain' produces exactly {N_DOMAIN_FEATURES} features, but "
-            f"quantum.num_qubits={qcfg['num_qubits']}. Set num_qubits: {N_DOMAIN_FEATURES}."
-        )
+        raise ValueError(f"tensor_network.feature_encoding must be 'pca' or 'domain', got {feature_encoding!r}")
+    num_features = N_DOMAIN_FEATURES if feature_encoding == "domain" else tncfg["pca_dims"]
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
     meta_path = splits_dir / splits_metadata
@@ -236,10 +211,7 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
         bsuf = backbone_suffix if backbone_suffix is not None else output_suffix
         ckpt_path = results_dir / f"classical_backbone_state{bsuf}.weights.h5"
         if not ckpt_path.exists():
-            raise FileNotFoundError(
-                f"{ckpt_path} not found. Run classical_baseline.py first (it must save the "
-                "trained backbone weights so quantum_hybrid.py can reuse the SAME frozen CNN)."
-            )
+            raise FileNotFoundError(f"{ckpt_path} not found. Run classical_baseline.py first.")
         backbone = load_backbone_for_features(
             ckpt_path, n_classes, cfg["classical"]["pretrained"],
             cfg["classical"].get("backbone", "resnet50"), cfg["classical"].get("head_dropout", 0.0),
@@ -263,7 +235,7 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
     val_df = split_df[split_df["split"] == "val"]
     test_df = split_df[split_df["split"] == "test"]
     if smoke_test:
-        n_per_class = max(10, qcfg["pca_dims"] + 2)
+        n_per_class = max(10, num_features + 2)
         train_df = train_df.groupby("label", group_keys=False).head(n_per_class)
         val_df = val_df.groupby("label", group_keys=False).head(4)
         test_df = test_df.groupby("label", group_keys=False).head(4)
@@ -273,7 +245,7 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
     test_feats_raw, test_labels, test_files = encode(test_df)
 
     if feature_encoding == "pca":
-        pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
+        pca = PCA(n_components=num_features, random_state=cfg["seed"])
         pca.fit(train_feats_raw)
         train_feats = pca.transform(train_feats_raw)
         val_feats = pca.transform(val_feats_raw)
@@ -286,13 +258,12 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
     val_feats = val_feats * scale
     test_feats = test_feats * scale
 
-    head = build_hybrid_head(qcfg["num_qubits"], qcfg["circuit_depth"], n_classes,
-                              qcfg["diff_method"], qcfg.get("data_reuploading", False))
-    head.build((None, qcfg["num_qubits"]))
+    head = build_tn_head(num_features, tncfg["bond_dim"], n_classes)
+    head.build((None, num_features))
     n_params = sum(int(np.prod(v.shape)) for v in head.weights)
 
     t0 = time.time()
-    head, history = train_hybrid(head, train_feats, train_labels, val_feats, val_labels, qcfg)
+    head, history = train_tn(head, train_feats, train_labels, val_feats, val_labels, tncfg)
     train_time_s = time.time() - t0
 
     t0 = time.time()
@@ -305,18 +276,17 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
     test_metrics = compute_metrics(test_labels, test_preds, test_probs, n_classes)
 
     cv_results = []
-    if not smoke_test:
+    if not smoke_test and not skip_cv:
         k = meta["kfold"]
         for fold in range(k):
-            print(f"\n=== [hybrid] CV fold {fold+1}/{k} (qubits={qcfg['num_qubits']}, "
-                  f"depth={qcfg['circuit_depth']}) ===")
+            print(f"\n=== [tn] CV fold {fold+1}/{k} (bond_dim={tncfg['bond_dim']}) ===")
             fold_train_df = fold_df[fold_df["fold"] != fold]
             fold_test_df = fold_df[fold_df["fold"] == fold]
             ft_raw, ft_labels, _ = encode(fold_train_df)
             fte_raw, fte_labels, _ = encode(fold_test_df)
 
             if feature_encoding == "pca":
-                fold_pca = PCA(n_components=qcfg["pca_dims"], random_state=cfg["seed"])
+                fold_pca = PCA(n_components=num_features, random_state=cfg["seed"])
                 fold_pca.fit(ft_raw)
                 ft = fold_pca.transform(ft_raw)
                 fte = fold_pca.transform(fte_raw)
@@ -325,25 +295,23 @@ def run_hybrid_pipeline(cfg, research_root, num_qubits=None, circuit_depth=None,
             fold_scale = np.pi / (np.abs(ft).max(axis=0) + 1e-8)
             ft, fte = ft * fold_scale, fte * fold_scale
 
-            fold_head = build_hybrid_head(qcfg["num_qubits"], qcfg["circuit_depth"], n_classes,
-                                           qcfg["diff_method"], qcfg.get("data_reuploading", False))
-            fold_head.build((None, qcfg["num_qubits"]))
-            fold_head, _ = train_hybrid(fold_head, ft, ft_labels, fte, fte_labels, qcfg)
+            fold_head = build_tn_head(num_features, tncfg["bond_dim"], n_classes)
+            fold_head.build((None, num_features))
+            fold_head, _ = train_tn(fold_head, ft, ft_labels, fte, fte_labels, tncfg)
             fte_logits = fold_head(tf.constant(fte, dtype=tf.float32), training=False)
             fte_probs = tf.nn.softmax(fte_logits, axis=1).numpy()
             fte_preds = fte_probs.argmax(axis=1)
             fold_metrics = compute_metrics(fte_labels, fte_preds, fte_probs, n_classes)
             fold_metrics["fold"] = fold
             cv_results.append(fold_metrics)
-            print(f"[hybrid] Fold {fold} accuracy={fold_metrics['accuracy']:.4f}")
+            print(f"[tn] Fold {fold} accuracy={fold_metrics['accuracy']:.4f}")
 
     return {
-        "model": "quantum_hybrid_tf",
+        "model": "tensor_network_hybrid_tf",
         "framework": "tensorflow",
         "feature_encoding": feature_encoding,
-        "num_qubits": qcfg["num_qubits"],
-        "circuit_depth": qcfg["circuit_depth"],
-        "data_reuploading": qcfg.get("data_reuploading", False),
+        "num_features": num_features,
+        "bond_dim": tncfg["bond_dim"],
         "n_params": int(n_params),
         "train_time_s": train_time_s,
         "inference_time_s_total_test": inference_time_s,
@@ -371,6 +339,8 @@ def main():
     parser.add_argument("--splits-metadata", default="run_metadata.json")
     parser.add_argument("--output-suffix", default="")
     parser.add_argument("--backbone-suffix", default=None)
+    parser.add_argument("--bond-dim", type=int, default=None)
+    parser.add_argument("--skip-cv", action="store_true")
     args = parser.parse_args()
     suf = args.output_suffix
 
@@ -384,24 +354,23 @@ def main():
     set_seed(cfg["seed"])
     print("Device: CPU (TensorFlow)")
 
-    result = run_hybrid_pipeline(
-        cfg, research_root, smoke_test=args.smoke_test,
+    result = run_tn_pipeline(
+        cfg, research_root, bond_dim=args.bond_dim, smoke_test=args.smoke_test,
         splits_metadata=args.splits_metadata, output_suffix=suf,
-        backbone_suffix=args.backbone_suffix,
+        backbone_suffix=args.backbone_suffix, skip_cv=args.skip_cv,
     )
 
     results_dir = research_root / cfg["paths"]["results_dir"]
     results_dir.mkdir(parents=True, exist_ok=True)
     preds = result.pop("test_predictions")
-    metrics_path = results_dir / f"quantum_metrics{suf}.json"
+    metrics_path = results_dir / f"tensor_network_metrics{suf}.json"
     with open(metrics_path, "w") as f:
         json.dump(result, f, indent=2)
-    with open(results_dir / f"quantum_test_predictions{suf}.json", "w") as f:
+    with open(results_dir / f"tensor_network_test_predictions{suf}.json", "w") as f:
         json.dump(preds, f, indent=2)
 
-    print("\n=== Quantum hybrid summary ===")
-    print(f"Feature encoding={result['feature_encoding']} qubits={result['num_qubits']} "
-          f"depth={result['circuit_depth']}")
+    print("\n=== Tensor-network hybrid summary ===")
+    print(f"Feature encoding={result['feature_encoding']} bond_dim={result['bond_dim']}")
     print(f"Test accuracy: {result['test_metrics']['accuracy']:.4f}")
     print(f"Test F1 (macro): {result['test_metrics']['f1_macro']:.4f}")
     if result["cv_fold_metrics"]:

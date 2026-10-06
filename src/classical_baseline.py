@@ -1,29 +1,34 @@
 """
 Classical baseline: pretrained ResNet-50, fine-tuned on the wound-image classification task.
 
+TensorFlow/Keras port (2026-09-21) of the original PyTorch implementation, requested to move
+the whole pipeline off PyTorch. Same architecture, same gradual-unfreezing schedule, same
+augmentation recipe, same class-weighted loss, same early stopping, same train/val/test and
+5-fold CV protocol -- only the framework changed, so results are meant to be honestly
+re-measured on this framework, not assumed equal to the PyTorch numbers.
+
 Trains on the train_val_test split from data_prep.py (early layers frozen first, then
-optionally unfinetuned end-to-end), evaluates on the held-out test set AND across the 5-fold
+gradually unfrozen block-by-block), evaluates on the held-out test set AND across the 5-fold
 CV splits, and saves:
   - results/classical_metrics.json   (all metrics, test set + per-fold CV)
   - results/classical_features.npy   (penultimate-layer features for the test set, reused by
-                                       quantum_hybrid.py so both models see identical CNN
-                                       features)
+                                       quantum_hybrid.py / tensor_network.py so every model sees
+                                       identical CNN features)
   - results/classical_test_predictions.json  (per-image predictions, used for McNemar's test)
+  - results/classical_backbone_state.weights.h5 (Keras weights checkpoint)
   - figures/classical_training_curves.png
   - figures/classical_confusion_matrix.png
 
 Run: python src/classical_baseline.py --config configs/config.yaml
 """
 import argparse
-import copy
 import json
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
+import tensorflow as tf
 import yaml
 from PIL import Image
 from sklearn.metrics import (
@@ -33,8 +38,8 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from torch.utils.data import DataLoader, Dataset
-from torchvision import models, transforms
+from tensorflow import keras
+from tensorflow.keras import layers
 
 
 def load_config(config_path: str) -> dict:
@@ -46,23 +51,30 @@ def set_seed(seed: int):
     import random
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    tf.random.set_seed(seed)
 
 
-class WoundImageDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, label_to_idx: dict, transform, base_dir: Path = None,
+# ---------------------------------------------------------------------------
+# Data loading. Images are decoded with PIL (not tf.io) so preprocess_fn (wound_crop) -- which
+# is written against PIL.Image -- plugs in identically to the PyTorch version.
+# ---------------------------------------------------------------------------
+
+class WoundImageDataset:
+    """Mirrors the PyTorch WoundImageDataset: builds (image_array, label, image_id) triples.
+    transform_fn takes a PIL image and returns an (H, W, 3) float32 array already normalized."""
+
+    def __init__(self, df: pd.DataFrame, label_to_idx: dict, transform_fn, base_dir: Path = None,
                  preprocess_fn=None):
         self.df = df.reset_index(drop=True)
         self.label_to_idx = label_to_idx
-        self.transform = transform
+        self.transform_fn = transform_fn
         self.base_dir = base_dir
-        self.preprocess_fn = preprocess_fn  # e.g. wound_crop.wound_crop; applied before transform
+        self.preprocess_fn = preprocess_fn
 
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def load_one(self, idx):
         row = self.df.iloc[idx]
         fp = Path(row["filepath"])
         if self.base_dir is not None and not fp.is_absolute():
@@ -70,13 +82,25 @@ class WoundImageDataset(Dataset):
         img = Image.open(fp).convert("RGB")
         if self.preprocess_fn is not None:
             img = self.preprocess_fn(img)
-        img = self.transform(img)
+        arr = self.transform_fn(img)
         label = self.label_to_idx[row["label"]]
         # Bare filenames collide across class folders in this dataset (e.g. both
         # healthy/10.jpg and ulcer/10.jpg exist) -- use "label/filename" as the unique id
         # everywhere downstream (predictions JSON, McNemar alignment, Grad-CAM lookup).
         image_id = f"{row['label']}/{row['filename']}"
-        return img, label, image_id
+        return arr, label, image_id
+
+    def to_arrays(self):
+        """Materializes the whole split into (images[N,H,W,3], labels[N], files[N]). Datasets
+        here are small (<1000 images) so this is simpler and just as fast as a tf.data pipeline,
+        and keeps exact parity with the PyTorch version's per-sample preprocessing order."""
+        imgs, labels, files = [], [], []
+        for i in range(len(self)):
+            arr, label, fid = self.load_one(i)
+            imgs.append(arr)
+            labels.append(label)
+            files.append(fid)
+        return np.stack(imgs).astype("float32"), np.array(labels, dtype="int64"), files
 
 
 def get_preprocess_fn(cfg):
@@ -88,260 +112,270 @@ def get_preprocess_fn(cfg):
     return None
 
 
+def _imagenet_normalize(arr, mean, std):
+    arr = arr / 255.0
+    return (arr - np.array(mean, dtype="float32")) / np.array(std, dtype="float32")
+
+
 def build_transforms(cfg):
+    """Returns (train_tf, eval_tf): PIL.Image -> (H, W, 3) float32 array. RandomResizedCrop /
+    flips / color jitter reimplemented with PIL + numpy to match torchvision's semantics
+    (independent per-image random crop scale/aspect, then resize)."""
     mean = cfg["classical"]["imagenet_mean"]
     std = cfg["classical"]["imagenet_std"]
     size = cfg["data"]["image_size"]
     cj = cfg["classical"]["color_jitter"]
-    augmentation = cfg["classical"].get("augmentation", "standard")
 
-    if augmentation == "randaugment":
-        train_tf = transforms.Compose([
-            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(p=0.2),
-            transforms.RandAugment(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-    elif augmentation == "heavy":
-        # Matches the augmentation recipe reported in Chowdhury et al., "Eff-ReLU-Net: a deep
-        # learning framework for multiclass wound classification" (PMC12220098), the only
-        # published result found on this exact AZH 4-class dataset that reaches ~90% accuracy:
-        # fixed 90/180/270 rotations + continuous random rotation + translation + elastic
-        # deformation + gamma correction, on top of the crop/flip/jitter already used here.
-        train_tf = transforms.Compose([
-            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(p=0.2),
-            transforms.RandomChoice([
-                transforms.RandomRotation((angle, angle)) for angle in (0, 90, 180, 270)
-            ]),
-            transforms.RandomRotation(15),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-            transforms.ElasticTransform(alpha=50.0),
-            transforms.ColorJitter(
-                brightness=cj["brightness"], contrast=cj["contrast"],
-                saturation=cj["saturation"], hue=cj["hue"],
-            ),
-            transforms.Lambda(
-                lambda img: transforms.functional.adjust_gamma(img, gamma=float(np.random.uniform(0.8, 1.2)))
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-    else:
-        train_tf = transforms.Compose([
-            transforms.RandomResizedCrop(size, scale=(0.8, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(p=0.2),
-            transforms.ColorJitter(
-                brightness=cj["brightness"], contrast=cj["contrast"],
-                saturation=cj["saturation"], hue=cj["hue"],
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-    eval_tf = transforms.Compose([
-        transforms.Resize(int(size * 1.14)),
-        transforms.CenterCrop(size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
-    ])
+    def random_resized_crop(img, scale=(0.8, 1.0)):
+        w, h = img.size
+        area = w * h
+        for _ in range(10):
+            target_area = np.random.uniform(*scale) * area
+            aspect = np.exp(np.random.uniform(np.log(3 / 4), np.log(4 / 3)))
+            cw = int(round(np.sqrt(target_area * aspect)))
+            ch = int(round(np.sqrt(target_area / aspect)))
+            if cw <= w and ch <= h:
+                x0 = np.random.randint(0, w - cw + 1)
+                y0 = np.random.randint(0, h - ch + 1)
+                return img.crop((x0, y0, x0 + cw, y0 + ch)).resize((size, size), Image.BILINEAR)
+        return img.resize((size, size), Image.BILINEAR)
+
+    def color_jitter(img):
+        from PIL import ImageEnhance
+        for enhancer_cls, key in ((ImageEnhance.Brightness, "brightness"),
+                                   (ImageEnhance.Contrast, "contrast"),
+                                   (ImageEnhance.Color, "saturation")):
+            factor = 1.0 + np.random.uniform(-cj[key], cj[key])
+            img = enhancer_cls(img).enhance(factor)
+        return img
+
+    def train_tf(img):
+        img = random_resized_crop(img)
+        if np.random.rand() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if np.random.rand() < 0.2:
+            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+        img = color_jitter(img)
+        arr = np.asarray(img, dtype="float32")
+        return _imagenet_normalize(arr, mean, std)
+
+    def eval_tf(img):
+        resize_to = int(size * 1.14)
+        img = img.resize((resize_to, resize_to), Image.BILINEAR)
+        left = (resize_to - size) // 2
+        top = (resize_to - size) // 2
+        img = img.crop((left, top, left + size, top + size))
+        arr = np.asarray(img, dtype="float32")
+        return _imagenet_normalize(arr, mean, std)
+
     return train_tf, eval_tf
 
 
-def _replace_silu_with_relu(module: nn.Module):
-    """EfficientNet uses SiLU (Swish) activations everywhere; Eff-ReLU-Net's finding is that
-    swapping these for ReLU improves accuracy/efficiency on this dataset. Recurses through
-    every submodule since SiLU is used inside MBConv blocks, not just at the top level."""
-    for name, child in module.named_children():
-        if isinstance(child, nn.SiLU):
-            setattr(module, name, nn.ReLU(inplace=True))
-        else:
-            _replace_silu_with_relu(child)
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+# Order to gradually unfreeze ResNet-50's blocks in, latest (most task-specific) first -- the
+# standard transfer-learning heuristic for discriminative fine-tuning. Keras's ResNet50 names
+# layers "conv2_block*" (~layer1) .. "conv5_block*" (~layer4); this maps the config's
+# torchvision-style block names onto the Keras layer-name prefixes.
+RESNET_UNFREEZE_ORDER = ["layer4", "layer3", "layer2", "layer1", "conv1_bn1"]
+_BLOCK_PREFIX = {
+    "layer4": "conv5_block", "layer3": "conv4_block", "layer2": "conv3_block",
+    "layer1": "conv2_block", "conv1_bn1": "conv1",
+}
 
 
 def build_model(num_classes: int, pretrained: bool, backbone: str = "resnet50", head_dropout: float = 0.0):
-    if backbone == "resnet50":
-        weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
-        model = models.resnet50(weights=weights)
-        for p in model.parameters():
-            p.requires_grad = False
-        in_features = model.fc.in_features
-        # Dropout has no learnable params, so wrapping it with the Linear head here doesn't
-        # change state_dict keys regardless of head_dropout's value (fc.0 = Dropout, fc.1 =
-        # Linear) -- callers that load a checkpoint without specifying head_dropout still work.
-        model.fc = nn.Sequential(nn.Dropout(p=head_dropout), nn.Linear(in_features, num_classes))
-        return model
-    elif backbone == "efficientnet_b0_relu":
-        # Reproduces Eff-ReLU-Net (Chowdhury et al., PMC12220098): EfficientNet-B0 backbone,
-        # Swish->ReLU everywhere, and a 512->256->128->n_classes dense head instead of a
-        # single linear layer, which is the published recipe reaching 90% on this AZH dataset.
-        weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
-        model = models.efficientnet_b0(weights=weights)
-        for p in model.parameters():
-            p.requires_grad = False
-        _replace_silu_with_relu(model)
-        in_features = model.classifier[1].in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(in_features, 512), nn.ReLU(inplace=True),
-            nn.Linear(512, 256), nn.ReLU(inplace=True),
-            nn.Linear(256, 128), nn.ReLU(inplace=True),
-            nn.Linear(128, num_classes),
-        )
-        return model
-    else:
-        raise ValueError(f"Unknown classical.backbone {backbone!r}; expected 'resnet50' or 'efficientnet_b0_relu'")
+    if backbone != "resnet50":
+        raise ValueError(f"Unknown classical.backbone {backbone!r}; TF port only implements 'resnet50'")
+    weights = "imagenet" if pretrained else None
+    base = keras.applications.ResNet50(include_top=False, weights=weights, pooling="avg",
+                                        input_shape=(224, 224, 3))
+    base.trainable = False
+    inputs = keras.Input(shape=(224, 224, 3))
+    feats = base(inputs, training=False)
+    x = layers.Dropout(head_dropout)(feats)
+    outputs = layers.Dense(num_classes)(x)  # logits, no softmax (matches nn.CrossEntropyLoss)
+    model = keras.Model(inputs, outputs, name="resnet50_classifier")
+    model.backbone = base
+    model.feature_extractor = keras.Model(inputs, feats)
+    return model
 
 
-def head_attr_name(model) -> str:
-    """Name of the final classification submodule -- 'fc' for resnet50, 'classifier' for
-    efficientnet -- so the rest of the file can stay architecture-agnostic."""
-    return "fc" if hasattr(model, "fc") else "classifier"
+def resnet_block_layers(model, block_name: str):
+    prefix = _BLOCK_PREFIX[block_name]
+    return [l for l in model.backbone.layers if l.name.startswith(prefix)]
+
+
+def _unfreezable(layer) -> bool:
+    """Excludes BatchNormalization layers from ever being set trainable=True. Unfreezing BN
+    during fine-tuning is a well-documented Keras transfer-learning pitfall (see the official
+    Keras transfer-learning guide): with running statistics built on ImageNet-scale batches
+    suddenly starting to adapt to this dataset's batch_size=32 minibatches, the moving
+    mean/variance destabilize and validation loss explodes (observed directly in an earlier run
+    of this pipeline: val_loss spiked from ~1.3 to 1474 the epoch after layer4 was unfrozen).
+    BN layers stay permanently frozen (both affine params and running stats); only Conv2D/Dense
+    weights in a block actually unfreeze."""
+    return not isinstance(layer, keras.layers.BatchNormalization)
 
 
 def set_backbone_trainable(model, trainable: bool):
-    prefix = head_attr_name(model)
-    for name, p in model.named_parameters():
-        if name.startswith(prefix):
-            continue
-        p.requires_grad = trainable
-
-
-def mixup_cutmix_batch(imgs, labels, alpha, cutmix_prob, device):
-    """Randomly applies MixUp (linear pixel blend) or CutMix (patch swap) to one batch, chosen
-    per-batch with probability cutmix_prob. Returns (imgs, labels_a, labels_b, lam) for a
-    lam-weighted loss: lam*CE(out,labels_a) + (1-lam)*CE(out,labels_b). alpha<=0 disables this
-    and returns the batch unchanged with lam=1.0 (equivalent to plain CE on the true labels)."""
-    if alpha <= 0:
-        return imgs, labels, labels, 1.0
-    lam = float(np.random.beta(alpha, alpha))
-    perm = torch.randperm(imgs.size(0), device=device)
-    labels_b = labels[perm]
-
-    if np.random.rand() < cutmix_prob:
-        h, w = imgs.shape[2], imgs.shape[3]
-        cut_rat = np.sqrt(1.0 - lam)
-        cut_h, cut_w = int(h * cut_rat), int(w * cut_rat)
-        cy, cx = np.random.randint(h), np.random.randint(w)
-        y1, y2 = int(np.clip(cy - cut_h // 2, 0, h)), int(np.clip(cy + cut_h // 2, 0, h))
-        x1, x2 = int(np.clip(cx - cut_w // 2, 0, w)), int(np.clip(cx + cut_w // 2, 0, w))
-        imgs[:, :, y1:y2, x1:x2] = imgs[perm][:, :, y1:y2, x1:x2]
-        lam = 1.0 - ((x2 - x1) * (y2 - y1) / (w * h))
-    else:
-        imgs = lam * imgs + (1 - lam) * imgs[perm]
-
-    return imgs, labels, labels_b, lam
-
-
-def run_epoch(model, loader, criterion, optimizer, device, train: bool, mixup_cfg=None):
-    model.train() if train else model.eval()
-    total_loss, n_correct, n_total = 0.0, 0, 0
-    with torch.set_grad_enabled(train):
-        for imgs, labels, _ in loader:
-            imgs, labels = imgs.to(device), labels.to(device)
-            if train:
-                optimizer.zero_grad()
-            labels_a, labels_b, lam = labels, labels, 1.0
-            if train and mixup_cfg and mixup_cfg.get("enabled", False):
-                imgs, labels_a, labels_b, lam = mixup_cutmix_batch(
-                    imgs, labels, mixup_cfg.get("alpha", 0.2), mixup_cfg.get("cutmix_prob", 0.5), device,
-                )
-            outputs = model(imgs)
-            if lam != 1.0:
-                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
-            else:
-                loss = criterion(outputs, labels_a)
-            if train:
-                loss.backward()
-                optimizer.step()
-            total_loss += loss.item() * imgs.size(0)
-            preds = outputs.argmax(dim=1)
-            # Under mixup/cutmix, "correct" is measured against the dominant (lam-weighted)
-            # label as an approximation -- accuracy isn't strictly well-defined for soft targets.
-            n_correct += (preds == labels_a).sum().item()
-            n_total += imgs.size(0)
-    return total_loss / n_total, n_correct / n_total
-
-
-def compute_class_weights(dataset, n_classes: int, device) -> torch.Tensor:
-    """Inverse-frequency class weights from the given (training) dataset, normalized so the
-    mean weight is ~1 (i.e. weight_c = N / (n_classes * count_c)). Computed fresh per call so
-    each CV fold's training subset gets weights matching its own (slightly different) class
-    balance, rather than reusing the main split's weights everywhere."""
-    counts = np.zeros(n_classes, dtype=np.float64)
-    for label in dataset.df["label"]:
-        counts[dataset.label_to_idx[label]] += 1
-    counts = np.maximum(counts, 1)  # guard div-by-zero if a class is empty in some fold
-    weights = counts.sum() / (n_classes * counts)
-    return torch.tensor(weights, dtype=torch.float32, device=device)
-
-
-def make_optimizer(params, ccfg, lr):
-    if ccfg.get("optimizer", "adam") == "sgd":
-        return torch.optim.SGD(
-            params, lr=lr, momentum=ccfg.get("momentum", 0.9), weight_decay=ccfg["weight_decay"],
-        )
-    return torch.optim.Adam(params, lr=lr, weight_decay=ccfg["weight_decay"])
-
-
-# Order to gradually unfreeze ResNet-50's blocks in, latest (most task-specific) first -- the
-# standard transfer-learning heuristic for discriminative fine-tuning.
-RESNET_UNFREEZE_ORDER = ["layer4", "layer3", "layer2", "layer1", "conv1_bn1"]
-
-
-def resnet_block_modules(model, block_name: str):
-    if block_name == "conv1_bn1":
-        return [model.conv1, model.bn1]
-    return [getattr(model, block_name)]
+    model.backbone.trainable = trainable
+    for l in model.backbone.layers:
+        l.trainable = trainable and _unfreezable(l)
 
 
 def set_resnet_block_trainable(model, block_name: str, trainable: bool):
-    for m in resnet_block_modules(model, block_name):
-        for p in m.parameters():
-            p.requires_grad = trainable
+    for l in resnet_block_layers(model, block_name):
+        l.trainable = trainable and _unfreezable(l)
 
 
-def build_discriminative_optimizer(model, ccfg, unfrozen_blocks: list):
-    """Adam/SGD with one param group per already-unfrozen block, each at
-    lr_finetune * lr_finetune_decay_per_block**i (i=0 for the first/most-recently-task-relevant
-    block unfrozen, decaying for earlier, more generic blocks), plus the head at lr_head."""
-    head = getattr(model, head_attr_name(model))
+def compute_class_weights(labels, n_classes: int) -> np.ndarray:
+    counts = np.maximum(np.bincount(labels, minlength=n_classes).astype(np.float64), 1)
+    return counts.sum() / (n_classes * counts)
+
+
+def make_head_optimizer(ccfg, lr):
+    """Always Adam, regardless of ccfg['optimizer'] -- used only for the classification head,
+    which trains from random init and benefits from Adam's fast convergence. The SGD switch
+    below is specifically about NOT disturbing already-converged pretrained backbone weights;
+    it doesn't apply to a head that has no pretrained weights to disturb in the first place."""
+    return keras.optimizers.Adam(learning_rate=lr, clipnorm=1.0)
+
+
+def make_optimizer(ccfg, lr):
+    # clipnorm=1.0: Adam's per-parameter step size is normalized by the gradient's own RMS, so
+    # even a tiny lr still takes a near-full-lr-sized step in whatever direction a noisy
+    # early-unfreezing gradient happens to point -- observed directly (val_loss spiking to
+    # 1474 the epoch after layer4 unfroze, on both random and real data, even after separately
+    # confirming BatchNorm layers stay frozen). Global-norm gradient clipping is the standard
+    # fix for exactly this fine-tuning instability pattern. Used for backbone blocks once they
+    # unfreeze (see make_head_optimizer for the head's own optimizer, which stays Adam).
+    if ccfg.get("optimizer", "adam") == "sgd":
+        return keras.optimizers.SGD(learning_rate=lr, momentum=ccfg.get("momentum", 0.9), clipnorm=1.0)
+    return keras.optimizers.Adam(learning_rate=lr, clipnorm=1.0)
+
+
+def weighted_ce_loss(class_weights, label_smoothing):
+    cw = tf.constant(class_weights, dtype=tf.float32)
+
+    def loss_fn(y_true, y_logits):
+        n_classes = y_logits.shape[-1]
+        y_onehot = tf.one_hot(tf.cast(y_true, tf.int32), n_classes)
+        if label_smoothing > 0:
+            y_onehot = y_onehot * (1 - label_smoothing) + label_smoothing / n_classes
+        per_example = tf.nn.softmax_cross_entropy_with_logits(y_onehot, y_logits)
+        sample_w = tf.gather(cw, tf.cast(y_true, tf.int32))
+        return tf.reduce_mean(per_example * sample_w)
+
+    return loss_fn
+
+
+def _train_step(model, x, y, loss_fn, optimizer, trainable_vars):
+    with tf.GradientTape() as tape:
+        logits = model(x, training=True)
+        loss = loss_fn(y, logits)
+    grads = tape.gradient(loss, trainable_vars)
+    optimizer.apply_gradients(zip(grads, trainable_vars))
+    return loss, logits
+
+
+def run_epoch(model, images, labels, loss_fn, optimizer, batch_size, train: bool, weight_decay=0.0):
+    n = images.shape[0]
+    idx = np.random.permutation(n) if train else np.arange(n)
+    total_loss, n_correct = 0.0, 0
+    trainable_vars = model.trainable_variables if train else None
+    for i in range(0, n, batch_size):
+        b = idx[i:i + batch_size]
+        xb = tf.constant(images[b])
+        yb = tf.constant(labels[b])
+        if train:
+            if weight_decay > 0:
+                for v in trainable_vars:
+                    v.assign_sub(weight_decay * optimizer.learning_rate * v)
+            loss, logits = _train_step(model, xb, yb, loss_fn, optimizer, trainable_vars)
+        else:
+            logits = model(xb, training=False)
+            loss = loss_fn(yb, logits)
+        total_loss += float(loss) * len(b)
+        n_correct += int(tf.reduce_sum(tf.cast(tf.argmax(logits, axis=1) == yb, tf.int32)))
+    return total_loss / n, n_correct / n
+
+
+def build_discriminative_step(model, ccfg, unfrozen_blocks: list):
+    """Returns (train_step_fn, optimizer_list, var_groups) -- one Adam/SGD optimizer per
+    param group (head at lr_head; each unfrozen block at lr_finetune * decay**i, i=0 for the
+    most-recently-unfrozen/most task-specific block), applied in one GradientTape pass."""
     decay = ccfg.get("lr_finetune_decay_per_block", 0.3)
-    param_groups = [{"params": list(head.parameters()), "lr": ccfg["lr_head"]}]
+    backbone_ids = {id(v) for v in model.backbone.trainable_variables}
+    head_vars = [v for v in model.trainable_variables if id(v) not in backbone_ids]
+    groups = [(head_vars, ccfg["lr_head"])]
     for i, block in enumerate(unfrozen_blocks):
         block_lr = ccfg["lr_finetune"] * (decay ** i)
-        params = [p for m in resnet_block_modules(model, block) for p in m.parameters()]
-        param_groups.append({"params": params, "lr": block_lr})
-    if ccfg.get("optimizer", "adam") == "sgd":
-        return torch.optim.SGD(
-            param_groups, momentum=ccfg.get("momentum", 0.9), weight_decay=ccfg["weight_decay"],
-        )
-    return torch.optim.Adam(param_groups, weight_decay=ccfg["weight_decay"])
+        block_vars = [v for l in resnet_block_layers(model, block) for v in l.trainable_variables]
+        groups.append((block_vars, block_lr))
+    # All groups (including the head) use SGD+momentum here, even though the head alone would
+    # prefer Adam (see make_head_optimizer, used only for the backbone-fully-frozen phase
+    # before this function is ever called): verified directly that Adam-on-head + SGD-on-block
+    # together reproduce the instability (loss 1.86->16.75 within 3 steps) even though
+    # SGD-on-both is stable -- the head's large Adam-normalized steps interact badly with the
+    # co-adapting backbone once both are moving at the same time.
+    optimizers = [make_optimizer(ccfg, lr) for _, lr in groups]
+    return groups, optimizers
 
 
-def train_classical(model, train_loader, val_loader, cfg, device):
+def train_discriminative_step(model, x, y, loss_fn, groups, optimizers):
+    with tf.GradientTape() as tape:
+        logits = model(x, training=True)
+        loss = loss_fn(y, logits)
+    all_vars = [v for vs, _ in groups for v in vs]
+    grads = tape.gradient(loss, all_vars)
+    gi = 0
+    for (vs, _), opt in zip(groups, optimizers):
+        n = len(vs)
+        opt.apply_gradients(zip(grads[gi:gi + n], vs))
+        gi += n
+    return loss, logits
+
+
+def run_epoch_discriminative(model, images, labels, loss_fn, groups, optimizers, batch_size):
+    n = images.shape[0]
+    idx = np.random.permutation(n)
+    total_loss, n_correct = 0.0, 0
+    for i in range(0, n, batch_size):
+        b = idx[i:i + batch_size]
+        xb, yb = tf.constant(images[b]), tf.constant(labels[b])
+        loss, logits = train_discriminative_step(model, xb, yb, loss_fn, groups, optimizers)
+        total_loss += float(loss) * len(b)
+        n_correct += int(tf.reduce_sum(tf.cast(tf.argmax(logits, axis=1) == yb, tf.int32)))
+    return total_loss / n, n_correct / n
+
+
+def train_classical(model, train_dataset, val_data, cfg):
+    """train_dataset: a WoundImageDataset (built with the RANDOM train_tf transform) whose
+    .to_arrays() is called fresh at the start of EVERY epoch, so each epoch sees newly sampled
+    crops/flips/color-jitter -- not the same fixed augmented copy repeated every epoch. Matters:
+    materializing it once up front (as an earlier version of this port did) means the model
+    trains on a single static set of augmented images for the whole run, which is much weaker
+    regularization than PyTorch's DataLoader (whose __getitem__ re-applies the transform on
+    every access) and was directly observed to cause fast overfitting (train_acc 30%->72% while
+    val_acc stayed flat around 35-48%, see classical_tf_groupsafe_run.log, 2026-09-22)."""
     ccfg = cfg["classical"]
-    n_classes = len(train_loader.dataset.label_to_idx)
-    class_weights = compute_class_weights(train_loader.dataset, n_classes, device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=ccfg.get("label_smoothing", 0.0))
+    val_x, val_y = val_data
+    n_classes = int(val_y.max()) + 1
+    train_labels_static = train_dataset.df["label"].map(train_dataset.label_to_idx).to_numpy()
+    class_weights = compute_class_weights(train_labels_static, n_classes)
+    loss_fn = weighted_ce_loss(class_weights, ccfg.get("label_smoothing", 0.0))
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_val_loss = float("inf")
-    best_state = None
+    best_weights = None
     patience_counter = 0
-    unfrozen = False
 
-    # Gradual unfreezing (one ResNet block at a time, with discriminative per-block learning
-    # rates) is only implemented for resnet50's named block structure; other backbones keep the
-    # original single-step "unfreeze everything at freeze_backbone_epochs" schedule.
-    gradual = ccfg.get("gradual_unfreezing", False) and head_attr_name(model) == "fc"
-    unfrozen_blocks = []  # populated in unfreeze order as gradual unfreezing progresses
-
-    optimizer = make_optimizer(
-        filter(lambda p: p.requires_grad, model.parameters()), ccfg, ccfg["lr_head"],
-    )
+    gradual = ccfg.get("gradual_unfreezing", False)
+    unfrozen_blocks = []
+    groups, optimizers = None, None
+    optimizer = make_head_optimizer(ccfg, ccfg["lr_head"])
 
     for epoch in range(ccfg["epochs"]):
         if gradual:
@@ -354,16 +388,14 @@ def train_classical(model, train_loader, val_loader, cfg, device):
                 block_lr = ccfg["lr_finetune"] * (ccfg.get("lr_finetune_decay_per_block", 0.3) ** (len(unfrozen_blocks) - 1))
                 print(f"Epoch {epoch}: gradually unfreezing ResNet block '{block}' at lr={block_lr:.2e}.")
                 set_resnet_block_trainable(model, block, True)
-                optimizer = build_discriminative_optimizer(model, ccfg, unfrozen_blocks)
-        elif ccfg["unfreeze_after"] and not unfrozen and epoch == ccfg["freeze_backbone_epochs"]:
-            print(f"Epoch {epoch}: unfreezing backbone for full fine-tuning.")
-            set_backbone_trainable(model, True)
-            unfrozen = True
-            optimizer = make_optimizer(model.parameters(), ccfg, ccfg["lr_finetune"])
+                groups, optimizers = build_discriminative_step(model, ccfg, unfrozen_blocks)
 
-        train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer, device, True,
-                                           mixup_cfg=ccfg.get("mixup_cutmix"))
-        val_loss, val_acc = run_epoch(model, val_loader, criterion, optimizer, device, False)
+        train_x, train_y, _ = train_dataset.to_arrays()  # fresh random augmentation this epoch
+        if groups is not None:
+            train_loss, train_acc = run_epoch_discriminative(model, train_x, train_y, loss_fn, groups, optimizers, ccfg["batch_size"])
+        else:
+            train_loss, train_acc = run_epoch(model, train_x, train_y, loss_fn, optimizer, ccfg["batch_size"], True, ccfg["weight_decay"])
+        val_loss, val_acc = run_epoch(model, val_x, val_y, loss_fn, optimizer, ccfg["batch_size"], False)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
@@ -374,7 +406,7 @@ def train_classical(model, train_loader, val_loader, cfg, device):
 
         if val_loss < best_val_loss - 1e-5:
             best_val_loss = val_loss
-            best_state = copy.deepcopy(model.state_dict())
+            best_weights = [w.numpy().copy() for w in model.weights]
             patience_counter = 0
         else:
             patience_counter += 1
@@ -382,84 +414,23 @@ def train_classical(model, train_loader, val_loader, cfg, device):
                 print(f"Early stopping at epoch {epoch+1} (best val_loss={best_val_loss:.4f}).")
                 break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    if best_weights is not None:
+        for w, val in zip(model.weights, best_weights):
+            w.assign(val)
     return model, history
 
 
-@torch.no_grad()
-def extract_features_and_predict(model, loader, device):
-    """Returns penultimate-layer features, logits/probs, predictions, labels, filenames."""
-    model.eval()
-    prefix = head_attr_name(model)
-    head = getattr(model, prefix)
-    # Drop the head submodule (fc / classifier) and keep everything else, in original order.
-    feature_extractor = nn.Sequential(*[m for name, m in model.named_children() if name != prefix])
-
-    all_features, all_probs, all_preds, all_labels, all_files = [], [], [], [], []
-    for imgs, labels, files in loader:
-        imgs = imgs.to(device)
-        feats = feature_extractor(imgs).flatten(1)
-        logits = head(feats)
-        probs = torch.softmax(logits, dim=1)
-        preds = probs.argmax(dim=1)
-
-        all_features.append(feats.cpu().numpy())
-        all_probs.append(probs.cpu().numpy())
-        all_preds.append(preds.cpu().numpy())
-        all_labels.append(labels.numpy())
-        all_files.extend(files)
-
-    return (
-        np.concatenate(all_features),
-        np.concatenate(all_probs),
-        np.concatenate(all_preds),
-        np.concatenate(all_labels),
-        all_files,
-    )
-
-
-def build_tta_transforms(cfg):
-    """8 deterministic views (identity + 3 rotations, each with/without a horizontal flip) built
-    from the same eval-time resize/crop/normalize as build_transforms()'s eval_tf, so TTA differs
-    from plain evaluation only in which augmented views are averaged, not in base preprocessing."""
-    mean = cfg["classical"]["imagenet_mean"]
-    std = cfg["classical"]["imagenet_std"]
-    size = cfg["data"]["image_size"]
-    views = []
-    for flip_h in (False, True):
-        for angle in (0, 90, 180, 270):
-            ops = [transforms.Resize(int(size * 1.14)), transforms.CenterCrop(size)]
-            if flip_h:
-                ops.append(transforms.Lambda(lambda img: transforms.functional.hflip(img)))
-            if angle != 0:
-                ops.append(transforms.Lambda(lambda img, a=angle: transforms.functional.rotate(img, a)))
-            ops += [transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)]
-            views.append(transforms.Compose(ops))
-    return views
-
-
-@torch.no_grad()
-def predict_with_tta(model, df, label_to_idx, base_dir, cfg, device, preprocess_fn=None):
-    """Averages softmax probabilities over build_tta_transforms()'s views. Returns
-    (probs, preds, labels, files), matching extract_features_and_predict's prediction outputs
-    (features are not meaningful to average across views, so they're not returned)."""
-    views = build_tta_transforms(cfg)
-    avg_probs, labels, files = None, None, None
-    for view_tf in views:
-        loader = DataLoader(
-            WoundImageDataset(df, label_to_idx, view_tf, base_dir, preprocess_fn),
-            batch_size=cfg["classical"]["batch_size"], shuffle=False, num_workers=0,
-        )
-        _, probs, _, view_labels, view_files = extract_features_and_predict(model, loader, device)
-        avg_probs = probs if avg_probs is None else avg_probs + probs
-        labels, files = view_labels, view_files
-    avg_probs = avg_probs / len(views)
-    preds = avg_probs.argmax(axis=1)
-    return avg_probs, preds, labels, files
+def extract_features_and_predict(model, images, labels, files):
+    feats = model.feature_extractor(tf.constant(images), training=False).numpy()
+    logits = model(tf.constant(images), training=False)
+    probs = tf.nn.softmax(logits, axis=1).numpy()
+    preds = probs.argmax(axis=1)
+    return feats, probs, preds, labels, files
 
 
 def compute_metrics(y_true, y_pred, y_probs, n_classes):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
     metrics = {
         "accuracy": float((y_true == y_pred).mean()),
         "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
@@ -534,16 +505,9 @@ def main():
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--smoke-test", action="store_true",
                          help="Run 1 epoch on a tiny subset to verify the pipeline executes.")
-    parser.add_argument("--splits-metadata", default="run_metadata.json",
-                         help="Which data/splits/*.json to read (e.g. run_metadata_groupsafe.json "
-                              "for the dedupe/group-safe split from dedupe_and_group_split.py).")
-    parser.add_argument("--output-suffix", default="",
-                         help="Appended to all output filenames (e.g. '_groupsafe') so a rerun on "
-                              "a different split does not overwrite the original results.")
-    parser.add_argument("--tta", action="store_true",
-                         help="Also evaluate the main test split with test-time augmentation "
-                              "(8-view average). Reported as a separate 'test_metrics_tta' field "
-                              "alongside the plain 'test_metrics', not in place of it.")
+    parser.add_argument("--splits-metadata", default="run_metadata.json")
+    parser.add_argument("--output-suffix", default="")
+    parser.add_argument("--tta", action="store_true")
     args = parser.parse_args()
     suf = args.output_suffix
 
@@ -556,8 +520,7 @@ def main():
     cfg = load_config(str(config_path))
 
     set_seed(cfg["seed"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print("Device: CPU (TensorFlow, no GPU on this machine)")
 
     splits_dir = research_root / cfg["data"]["splits_dir"]
     meta_path = splits_dir / args.splits_metadata
@@ -581,7 +544,6 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- Main train/val/test run ----
     train_df = split_df[split_df["split"] == "train"]
     val_df = split_df[split_df["split"] == "val"]
     test_df = split_df[split_df["split"] == "test"]
@@ -596,32 +558,24 @@ def main():
 
     ccfg = cfg["classical"]
     preprocess_fn = get_preprocess_fn(cfg)
-    train_loader = DataLoader(
-        WoundImageDataset(train_df, label_to_idx, train_tf, research_root, preprocess_fn),
-        batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
-    )
-    val_loader = DataLoader(
-        WoundImageDataset(val_df, label_to_idx, eval_tf, research_root, preprocess_fn),
-        batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
-    )
-    test_loader = DataLoader(
-        WoundImageDataset(test_df, label_to_idx, eval_tf, research_root, preprocess_fn),
-        batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
-    )
 
-    model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0)).to(device)
-    n_params = sum(p.numel() for p in model.parameters())
-    n_trainable_start = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    train_dataset = WoundImageDataset(train_df, label_to_idx, train_tf, research_root, preprocess_fn)
+    val_x, val_y, _ = WoundImageDataset(val_df, label_to_idx, eval_tf, research_root, preprocess_fn).to_arrays()
+    test_x, test_y, test_files = WoundImageDataset(test_df, label_to_idx, eval_tf, research_root, preprocess_fn).to_arrays()
+
+    model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0))
+    n_params = sum(int(np.prod(v.shape)) for v in model.weights)
+    n_trainable_start = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
     print(f"Model params: {n_params:,} total, {n_trainable_start:,} trainable at start.")
 
     t0 = time.time()
-    model, history = train_classical(model, train_loader, val_loader, cfg, device)
+    model, history = train_classical(model, train_dataset, (val_x, val_y), cfg)
     train_time_s = time.time() - t0
 
     plot_training_curves(history, figures_dir / f"classical_training_curves{suf}.png")
 
     t0 = time.time()
-    feats, probs, preds, labels, files = extract_features_and_predict(model, test_loader, device)
+    feats, probs, preds, labels, files = extract_features_and_predict(model, test_x, test_y, test_files)
     inference_time_s = time.time() - t0
     inference_time_per_image_ms = 1000 * inference_time_s / max(len(files), 1)
 
@@ -631,16 +585,38 @@ def main():
 
     test_metrics_tta = None
     if args.tta:
-        tta_probs, tta_preds, tta_labels, _ = predict_with_tta(
-            model, test_df, label_to_idx, research_root, cfg, device, preprocess_fn,
-        )
-        test_metrics_tta = compute_metrics(tta_labels, tta_preds, tta_probs, n_classes)
+        views = []
+        size = cfg["data"]["image_size"]
+        mean, std = ccfg["imagenet_mean"], ccfg["imagenet_std"]
+        for flip_h in (False, True):
+            for angle in (0, 90, 180, 270):
+
+                def view_fn(img, flip_h=flip_h, angle=angle):
+                    resize_to = int(size * 1.14)
+                    im = img.resize((resize_to, resize_to), Image.BILINEAR)
+                    left = (resize_to - size) // 2
+                    im = im.crop((left, left, left + size, left + size))
+                    if flip_h:
+                        im = im.transpose(Image.FLIP_LEFT_RIGHT)
+                    if angle:
+                        im = im.rotate(angle)
+                    return _imagenet_normalize(np.asarray(im, dtype="float32"), mean, std)
+
+                views.append(view_fn)
+        avg_probs = None
+        for view_fn in views:
+            vx, vy, _ = WoundImageDataset(test_df, label_to_idx, view_fn, research_root, preprocess_fn).to_arrays()
+            _, vp, _, _, _ = extract_features_and_predict(model, vx, vy, test_files)
+            avg_probs = vp if avg_probs is None else avg_probs + vp
+        avg_probs = avg_probs / len(views)
+        tta_preds = avg_probs.argmax(axis=1)
+        test_metrics_tta = compute_metrics(test_y, tta_preds, avg_probs, n_classes)
         print(f"[TTA] Test accuracy (8-view average): {test_metrics_tta['accuracy']:.4f} "
               f"(non-TTA: {test_metrics['accuracy']:.4f}, delta="
               f"{test_metrics_tta['accuracy'] - test_metrics['accuracy']:+.4f})")
 
     np.save(results_dir / f"classical_features{suf}.npy", feats)
-    torch.save(model.state_dict(), results_dir / f"classical_backbone_state{suf}.pt")
+    model.save_weights(str(results_dir / f"classical_backbone_state{suf}.weights.h5"))
     with open(results_dir / f"classical_test_predictions{suf}.json", "w") as f:
         json.dump({
             "filenames": files,
@@ -650,25 +626,22 @@ def main():
             "classes": classes,
         }, f, indent=2)
 
-    # ---- 5-fold CV (trained fresh per fold, same architecture/hparams) ----
     cv_results = []
     if not args.smoke_test:
         k = meta["kfold"]
         for fold in range(k):
             print(f"\n=== CV fold {fold+1}/{k} ===")
+            keras.backend.clear_session()  # release the previous fold's graph/variables (TF
+            # accumulates them across repeated model construction in a loop otherwise --
+            # observed growing from ~8GB to ~17GB across one main-split + one fold in an
+            # earlier run of this pipeline).
             fold_train_df = fold_df[fold_df["fold"] != fold]
             fold_test_df = fold_df[fold_df["fold"] == fold]
-            fold_train_loader = DataLoader(
-                WoundImageDataset(fold_train_df, label_to_idx, train_tf, research_root, preprocess_fn),
-                batch_size=ccfg["batch_size"], shuffle=True, num_workers=0,
-            )
-            fold_test_loader = DataLoader(
-                WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root, preprocess_fn),
-                batch_size=ccfg["batch_size"], shuffle=False, num_workers=0,
-            )
-            fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0)).to(device)
-            fold_model, _ = train_classical(fold_model, fold_train_loader, fold_test_loader, cfg, device)
-            _, fp, fpred, flabels, _ = extract_features_and_predict(fold_model, fold_test_loader, device)
+            fold_train_dataset = WoundImageDataset(fold_train_df, label_to_idx, train_tf, research_root, preprocess_fn)
+            fte_x, fte_y, _ = WoundImageDataset(fold_test_df, label_to_idx, eval_tf, research_root, preprocess_fn).to_arrays()
+            fold_model = build_model(n_classes, ccfg["pretrained"], ccfg.get("backbone", "resnet50"), ccfg.get("head_dropout", 0.0))
+            fold_model, _ = train_classical(fold_model, fold_train_dataset, (fte_x, fte_y), cfg)
+            _, fp, fpred, flabels, _ = extract_features_and_predict(fold_model, fte_x, fte_y, None)
             fold_metrics = compute_metrics(flabels, fpred, fp, n_classes)
             fold_metrics["fold"] = fold
             cv_results.append(fold_metrics)
@@ -677,7 +650,8 @@ def main():
         print("Smoke test: skipping 5-fold CV loop.")
 
     output = {
-        "model": "resnet50_classical_baseline",
+        "model": "resnet50_classical_baseline_tf",
+        "framework": "tensorflow",
         "seed": cfg["seed"],
         "splits_metadata_file": args.splits_metadata,
         "split_method": meta["split_method"],
